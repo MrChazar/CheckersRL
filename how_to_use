@@ -1,0 +1,10 @@
+Pliki:
+- run.py - pozwala nam zagrać z gui z wytrenowanym botem
+- run_training.py -  pozwala na skonfigurować uczenie naszego modelu, więcej szczegółów jest w train_pipeline.py
+- train_pipeline.py - definiuje wszystkie parametry uczenia o których powinniśmy wiedzieć
+- config.ini plik konfiguracyjny pozwalający nam wybrać model dla treningu oraz zwykłej gry
+- game_collector.py odpowiada za odpalanie gierek, pobieranie stanów aktualnie jest zbudowany po kątem MCTS i policy value network
+trzeba będzie przerobić pod DQN
+- mcts_alphazero i net_pytorch implementacja uczenia w stylu alphazero fajne
+- generator.py plik pozwalający na odpalanie wielu rozgrywek na raz nie zbadałem go jeszcze więc nie wiem czy zmiana sieci
+na DQN sprawi problemy
