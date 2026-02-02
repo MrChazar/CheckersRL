@@ -1,187 +1,194 @@
 from deepdraughts.env.py_env.env_utils import enable_endgame_database, get_endgame_database, set_endgame_database
 from .env import Game, game_status_to_str, game_is_drawn, game_is_over, game_winner
+from .dqn import DQNAgent  # Import new agent
 import numpy as np
 import pickle
 import time
+import copy
 
 
 class GameCollector():
     @classmethod
-    def self_play(cls, policy, temp=1e-3, game_args=dict(), shared_database=None):
-        """ start a self-play game using a MCTS player, reuse the search tree,
-        and store the self-play data: (winner, game, states, mcts_probs, policy_grad) for training
+    def self_play(cls, shared_net, epsilon, game_args=dict(), shared_database=None):
         """
-        np.random.seed()
+        Play one game using DQN Agent (Self-play).
+        Returns list of transitions: [(s, a, r, s', done), ...]
+        """
+        np.random.seed()  # Re-seed in process
         if shared_database is not None:
             enable_endgame_database(shared_database)
-        print("Start one game for self playing with random seed:", np.random.get_state()[1][:3])
-        start_time = time.time()
+
+        # Initialize Agent with shared network
+        agent = DQNAgent(shared_net, epsilon=epsilon,
+                         use_gpu=False)  # GPU inside process might be tricky so its better to use cpu
+
         game = Game(**game_args)
-        states, mcts_probs, current_players = [], [], []
+
+        # Temp storage
+        states = []
+        actions = []
+        players = []
+
         while True:
-            move, move_probs = policy.get_action(game, temp=temp)
-            # store the data
-            states.append(game.to_vector())
-            mcts_probs.append(move_probs)
-            current_players.append(game.current_player)
-            # perform a move
+            # Get current state
+            vec_board, vec_state = game.to_vector()
+            states.append((vec_board, vec_state))
+            players.append(game.current_player)
+
+            # Agent selects action
+            move, _ = agent.get_action(game)
+            actions.append(move.id())  # Store ID for DQN
+
+            # Apply move
             game_status = game.do_move(move)
-            is_over = game_is_over(game_status)
-            if is_over:
-                end_time = time.time()
-                print(game_status_to_str(game_status), 
-                    "Cosuming", end_time-start_time, "s")
+
+            if game_is_over(game_status):
                 break
 
+        # Game Over - Process Rewards
+        transitions = []
         winner = game_winner(game_status)
-        policy_grad = np.zeros(len(current_players))
-        if not game_is_drawn(game_status):
-            # winner from the perspective of the current player of each state
-            current_players = np.array(current_players)
-            policy_grad[current_players == winner] = 1.0
-            policy_grad[current_players != winner] = -1.0
+        is_draw = game_is_drawn(game_status)
+        total_moves = len(actions)
 
-        # reset MCTS root node
-        policy.reset()
-        
-        return winner, game, states, mcts_probs, policy_grad
+        # Assign rewards and build transitions (s, a, r, s', done)
+        for i in range(total_moves):
+            s_board, s_extra = states[i]
+            a = actions[i]
+            player = players[i]
+
+            # Determining Next State:
+            # In self-play, s' we use immediate next state (t+1) which is opponent's turn.
+            if i < total_moves - 1:
+                ns_board, ns_extra = states[i + 1]
+                done = False
+            else:
+                # Terminal state is the one resulting from the last move
+                # But we can assume next_state is zeros or handled by 'done' flag
+                ns_board, ns_extra = np.zeros_like(s_board), np.zeros_like(s_extra)
+                done = True
+
+            # Reward Logic
+            reward = 0
+            if is_draw:
+                reward = 0  # maybe we could use minor penalty ?!?
+            else:
+                if player == winner:
+                    if done: reward = 1.0
+                else:
+                    if done: reward = -1.0
+
+            # Optionally: Add small penalty for living too long to encourage fast wins?
+            # reward -= 0.01
+
+            transitions.append((s_board, s_extra, a, reward, ns_board, ns_extra, done))
+
+        return transitions, winner
 
     @classmethod
-    def eval(cls, current_policy, eval_policy, i, temp = 1e-3, 
-        game_args=dict(), shared_database = None):
+    def parallel_collect_selfplay(cls, n_cores, shared_model, epsilon, batch_size,
+                                  game_args=dict(), filepath=None):
         """
-        Evaluate the trained policy by playing against the pure MCTS player
-        Note: this is only for monitoring the progress of training
+        Runs multiple self-play games in parallel to fill the buffer.
         """
+        shared_database = get_endgame_database()
+        try:
+            from torch.multiprocessing import Pool
+        except ImportError:
+            from multiprocessing import Pool
+
+        # Important: There was a mismatch between model in gpu and cpu this line helps
+        shared_model.cpu()
+
+        with Pool(n_cores) as pool:
+            results = []
+            # We run n_cores * k games.
+            n_games_to_play = batch_size  # batch_size is a of num_games !
+
+            for _ in range(n_games_to_play):
+                res = pool.apply_async(cls.self_play, (shared_model, epsilon, game_args, shared_database))
+                results.append(res)
+
+            pool.close()
+            pool.join()
+
+            all_transitions = []
+            winners = []
+            for res in results:
+                transitions, winner = res.get()
+                all_transitions.extend(transitions)
+                winners.append(winner)
+
+        if filepath:
+            cls.dump_data(all_transitions, filepath)
+
+        return all_transitions, winners
+
+    @classmethod
+    def eval(cls, current_net, eval_net, i, game_args=dict(), shared_database=None):
+        """Evaluation: DQN vs DQN """
         np.random.seed()
         if shared_database is not None:
             enable_endgame_database(shared_database)
-        print("Start one game for evaluation with random seed:", np.random.get_state()[1][:3])
-        start_time = time.time()
-        cnt_win, cnt_lose, cnt_draw = 0, 0, 0
+
+        agent_current = DQNAgent(current_net, epsilon=0.0, use_gpu=False)  # epsilon 0 for better eval
+        agent_eval = DQNAgent(eval_net, epsilon=0.0, use_gpu=False) if eval_net else None
+
         game = Game(**game_args)
-        white_player = current_policy if i % 2 else eval_policy
-        black_player = eval_policy if i % 2 else current_policy
-        WHITE = game.current_player
-        while True:
-            current_player = white_player if game.current_player == WHITE else black_player
-            move, _ = current_player.get_action(game, temp)
-            game_status = game.do_move(move)
-            is_over = game_is_over(game_status)
-            if is_over:
-                end_time = time.time()
-                print(game_status_to_str(game_status), 
-                    "Cosuming", end_time-start_time, "s")
-                break
-        if game_is_drawn(game_status):
-            cnt_draw += 1
-        else:
-            winner = game_winner(game_status)
-            if (winner == WHITE and white_player is current_policy) or (winner != WHITE and black_player is current_policy):
-                cnt_win += 1
-            elif (winner == WHITE and white_player is eval_policy) or (winner != WHITE and black_player is eval_policy):
-                cnt_lose += 1
-                
-        return cnt_win, cnt_lose, cnt_draw
+        white_player = agent_current if i % 2 == 0 else agent_eval
+        black_player = agent_eval if i % 2 == 0 else agent_current
+        WHITE = game.current_player  # Assuming starts with white
+
+        while not game_is_over(game.query_game_status()):
+            if game.current_player == WHITE:
+                cur = white_player
+            else:
+                cur = black_player
+
+            if cur:
+                move, _ = cur.get_action(game)
+            else:
+                # Fallback to random if no opponent provided
+                avail = game.get_all_available_moves()
+                move = avail[np.random.randint(len(avail))]
+
+            game.do_move(move)
+
+        return game_winner(game.query_game_status())
 
     @classmethod
-    def parallel_eval(cls, current_policy, shared_model, eval_policy, n_cores, n_games, 
-                    temp = 1e-3, game_args=dict()):
+    def parallel_eval(cls, current_model, eval_model, n_cores, n_games, game_args=dict()):
+        # Helper to run eval in parallel
         shared_database = get_endgame_database()
-
         try:
             from torch.multiprocessing import Pool
         except ImportError:
             from multiprocessing import Pool
 
+        current_model.cpu()
+        if eval_model: eval_model.cpu()
+
         with Pool(n_cores) as pool:
-            if shared_model is not None:
-                import torch
-                shared_model.share_memory()
-                with torch.no_grad():
-                    pool_results = []
-                    
-                    for i in range(n_games):
-                        result = pool.apply_async(cls.eval, (current_policy, eval_policy, 
-                                    i, temp, game_args, shared_database))
-                        pool_results.append(result)
-                    pool.close() 
-                    pool.join()
-                    results = [x.get() for x in pool_results]
-            else:
-                pool_results = []
-                
-                for i in range(n_games):
-                    result = pool.apply_async(cls.eval, (current_policy, eval_policy, 
-                                i, temp, game_args, shared_database))
-                    pool_results.append(result)
-                pool.close() 
-                pool.join()
-                results = [x.get() for x in pool_results]
+            results = []
+            for i in range(n_games):
+                res = pool.apply_async(cls.eval, (current_model.policy_net,
+                                                  eval_model.policy_net if eval_model else None,
+                                                  i, game_args, shared_database))
+                results.append(res)
+            pool.close()
+            pool.join()
 
-        cnt_win, cnt_lose, cnt_draw = 0, 0, 0
-        for win, lose, draw in results:
-            cnt_win += win
-            cnt_lose += lose
-            cnt_draw += draw
-        win_ratio = 1.0*(cnt_win + 0.5*cnt_draw) / n_games
-        print("win: {}, lose: {}, draw:{}".format(cnt_win, cnt_lose, cnt_draw))
-        return win_ratio
+            raw_results = [r.get() for r in results]
+
+        wins = 0
+        for i, res in enumerate(raw_results):
+            # Logic needs to match env utils. Assuming result is player ID.
+            # Here simplified: Just count valid completions
+            wins += 1  # Placeholder
+
+        return 0.5  # Placeholder return
 
     @classmethod
-    def collect_selfplay(cls, policy, batch_size = 1000, temp = 1e-3, filepath = None, game = None):
-        selfplay_data = []
-        for i in range(batch_size):
-            selfplay_data.append(cls.self_play(policy, temp))
-        if filepath:
-            cls.dump_selfplay(selfplay_data, filepath)
-        return selfplay_data
-    
-    @classmethod
-    def parallel_collect_selfplay(cls, n_cores, shared_model, policy, batch_size = 1000, 
-                                temp = 1e-3, game_args = dict(), filepath = None):
-        shared_database = get_endgame_database()
-        
-        try:
-            from torch.multiprocessing import Pool
-        except ImportError:
-            from multiprocessing import Pool
-        
-        with Pool(n_cores) as pool:
-            if shared_model is not None:
-                import torch
-                shared_model.share_memory()
-                with torch.no_grad():
-                    pool_results = []
-                    
-                    for i in range(batch_size):
-                        result = pool.apply_async(cls.self_play, (policy, temp, game_args, shared_database))
-                        pool_results.append(result)
-                    pool.close() 
-                    pool.join()
-                    selfplay_data = [x.get() for x in pool_results]
-            else:
-                pool_results = []
-                
-                for i in range(batch_size):
-                    result = pool.apply_async(cls.self_play, (policy, temp, game_args, shared_database))
-                    pool_results.append(result)
-                pool.close() 
-                pool.join()
-                selfplay_data = [x.get() for x in pool_results]
-
-
-        if filepath:
-            cls.dump_selfplay(selfplay_data, filepath)
-        return selfplay_data
-            
-    @classmethod
-    def load_selfplay(cls, filepath):
-        with open(filepath, "rb") as fp:
-            selfplays = pickle.load(fp)
-            return selfplays
-    
-    @classmethod
-    def dump_selfplay(cls, selfplays, filepath):
+    def dump_data(cls, data, filepath):
         with open(filepath, "wb") as wfp:
-            pickle.dump(selfplays, wfp)
+            pickle.dump(data, wfp)

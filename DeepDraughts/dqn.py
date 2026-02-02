@@ -1,42 +1,76 @@
 import numpy as np
-import pickle
-from operator import itemgetter
+import random
+from collections import deque, namedtuple
 import torch
-import torch.nn as nn
-import torch.optim as optim
-import torch.nn.functional as F
-import numpy as np
-import os
-import datetime
 
-def set_learning_rate(optimizer, lr):
-    """Sets the learning rate to the given value"""
-    for param_group in optimizer.param_groups:
-        param_group['lr'] = lr
+# Single transition tuple
+Transition = namedtuple('Transition', (
+'state_vec_board', 'state_vec_extra', 'action', 'reward', 'next_state_vec_board', 'next_state_vec_extra', 'done'))
 
 
-def _initialize_weights(self):
-    for m in self.modules():
-        if isinstance(m, nn.Linear):
-            weight = (param.data for name, param in m.named_parameters() if "weight" in name)
-            for w in weight:
-                torch.nn.init.xavier_uniform_(m.weight)
+class ReplayBuffer:
+    def __init__(self, capacity):
+        self.buffer = deque(maxlen=capacity)
 
-        if isinstance(m, torch.nn.LSTM):
-            ih = (param.data for name, param in self.named_parameters() if 'weight_ih' in name)
-            hh = (param.data for name, param in self.named_parameters() if 'weight_hh' in name)
-            for w in ih:
-                nn.init.xavier_uniform(w)
-            for w in hh:
-                nn.init.orthogonal(w)
+    def push(self, *args):
+        self.buffer.append(Transition(*args))
 
-        if isinstance(m, torch.nn.Conv2d):
-            weight = (param.data for name, param in m.named_parameters() if "weight" in name)
-            for w in weight:
-                torch.nn.init.xavier_uniform_(m.weight)
+    def sample(self, batch_size):
+        return random.sample(self.buffer, batch_size)
 
-        # b = (param.data for name, param in self.named_parameters() if 'bias' in name)
-        # for w in b:
-        #     nn.init.constant(w, 0)
+    def __len__(self):
+        return len(self.buffer)
 
-    print(self.__class__.__name__ + ":\n" + str(list(self.modules())[0]))
+
+class DQNAgent:
+    def __init__(self, model_net, epsilon=0.1, use_gpu=False):
+        self.net = model_net
+        self.epsilon = epsilon
+        self.use_gpu = use_gpu
+
+    def get_action(self, game):
+        """
+        Select action using epsilon-greedy policy.
+        """
+        available_moves = game.get_all_available_moves()
+        if not available_moves:
+            return None, 0
+
+        # Exploration
+        if np.random.random() < self.epsilon:
+            return random.choice(available_moves), 0
+
+        # Exploitation
+        vec_board, vec_state = game.to_vector()
+
+        # Prepare tensors
+        if self.use_gpu:
+            t_board = torch.from_numpy(vec_board).cuda().float().unsqueeze(0)
+            t_state = torch.from_numpy(vec_state).cuda().float().unsqueeze(0)
+        else:
+            t_board = torch.from_numpy(vec_board).float().unsqueeze(0)
+            t_state = torch.from_numpy(vec_state).float().unsqueeze(0)
+
+        self.net.eval()
+        with torch.no_grad():
+            q_values = self.net(t_board, t_state)  # Shape: [1, n_actions]
+
+        q_values = q_values.cpu().numpy().flatten()
+
+        # Mask invalid moves with -infinity
+        legal_ids = [m.id() for m in available_moves]
+
+        best_q = -float('inf')
+        best_move = available_moves[0]
+
+        # Simple loop to find max Q among legal moves
+        for move in available_moves:
+            mid = move.id()
+            if q_values[mid] > best_q:
+                best_q = q_values[mid]
+                best_move = move
+
+        return best_move, best_q
+
+    def set_epsilon(self, eps):
+        self.epsilon = eps
