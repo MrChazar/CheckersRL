@@ -416,8 +416,6 @@ def get_env_args():
     '''    
     if current_borad == CONST_N_GRID_64:
         return CONST_N_SIZE_8, CONST_N_GRID_64, N_STATE_64, N_ACTION_64
-    elif current_borad == CONST_N_GRID_100:
-        return CONST_N_SIZE_10, CONST_N_GRID_100, N_STATE_100, N_ACTION_100
     else:
         raise Exception("Board size error!")
 

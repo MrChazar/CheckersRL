@@ -69,17 +69,16 @@ class GameCollector():
                 done = True
 
             # Reward Logic
-            reward = 0
-            if is_draw:
-                reward = 0  # maybe we could use minor penalty ?!?
-            else:
-                if player == winner:
-                    if done: reward = 1.0
-                else:
-                    if done: reward = -1.0
+            reward = -0.002
 
-            # Optionally: Add small penalty for living too long to encourage fast wins?
-            # reward -= 0.01
+            if done:  # End of a game
+                if is_draw:
+                    reward += -0.2
+                else:
+                    if player == winner:
+                        reward += 1.0
+                    else:
+                        reward += -1.0
 
             transitions.append((s_board, s_extra, a, reward, ns_board, ns_extra, done))
 

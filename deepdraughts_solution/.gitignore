@@ -8,7 +8,8 @@ __pycache__/
 
 # C extensions
 *.so
-
+.pdf
+.DAT
 # Distribution / packaging
 .Python
 build/

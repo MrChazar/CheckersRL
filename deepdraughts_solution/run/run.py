@@ -31,6 +31,7 @@ def run_human_play(config):
         play_with_alphazero(play_using_white, n_playout, checkpoint, name, use_gpu, l2_const)
 
     elif play_with == "dqn":
+        print("playing with dqn")
         checkpoint = config.get("model_args", "checkpoint")
         use_gpu = config.getboolean("model_args", "use_gpu")
         play_with_DQN(play_using_white, checkpoint, use_gpu)
@@ -49,6 +50,7 @@ def play_with_DQN(play_using_white=True, checkpoint=None, use_gpu=True):
     gui = GUI()
 
     # We load model
+    print(checkpoint)
     if checkpoint and os.path.exists(checkpoint):
         print(f"DQN loaded from:: {checkpoint}")
         try:

@@ -39,14 +39,14 @@ class DQNNet(nn.Module):
         self.bn1 = nn.BatchNorm2d(32)
         self.conv2 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
         self.bn2 = nn.BatchNorm2d(64)
-        self.conv3 = nn.Conv2d(64, 128, kernel_size=3, padding=1)
-        self.bn3 = nn.BatchNorm2d(128)
+        self.conv3 = nn.Conv2d(64, 256, kernel_size=3, padding=1)
+        self.bn3 = nn.BatchNorm2d(256)
 
         # State processing
-        self.st_fc1 = nn.Linear(n_states, 64)
+        self.st_fc1 = nn.Linear(n_states, 128)
 
         # linear
-        self.fc_common = nn.Linear(128 * nsize * nsize + 64, 512)
+        self.fc_common = nn.Linear(256 * nsize * nsize + 128, 512)
         self.fc_q_head = nn.Linear(512, n_actions)
 
         _initialize_weights(self)
