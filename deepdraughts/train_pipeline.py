@@ -1,141 +1,185 @@
-# -*- coding: utf-8 -*-
-
 from __future__ import print_function
-import random
 import numpy as np
-from collections import defaultdict
+import random
 from tensorboardX import SummaryWriter
-
 import datetime
-from .mcts_pure import MCTSPlayer as MCTS_pure
-from .mcts_alphazero import MCTSPlayer_alphazero as mcts_alphazero
-from .game_collector import GameCollector
+import os
+import copy
+import torch
+from .dqn import ReplayBuffer, DQNAgent
+from .game_collector import GameCollector, GAME_WIN, GAME_TIE, GAME_LOSS, PIECE_TAKEN
 from .env import Game
+from deepdraughts.mcts_pure import MCTSPlayer as MCTS_pure
+from .env import *
+
 
 class TrainPipeline():
-    def __init__(self, model, dir_save, config, game_args = dict()):
+    def __init__(self, model, dir_save, config, game_args=dict()):
+        # Training Args
         self.max_epoch = config.getint("training_args", "max_epoch")
-        self.batch_size = config.getint("training_args", "batch_size")  # mini-batch size for training
-        self.n_cores = config.getint("training_args", "n_cores") # number of cores for
-        self.epochs = config.getint("training_args", "epochs")  # num of train_steps for each update
+        self.batch_size = config.getint("training_args", "batch_size")  # Used for gradient update batch
+        self.n_cores = config.getint("training_args", "n_cores")
+        self.epochs = config.getint("training_args", "epochs")  # Gradient steps per epoch
         self.check_freq = config.getint("training_args", "check_freq")
         self.n_eval_games = config.getint("training_args", "n_eval_games")
 
-        self.learn_rate =config.getfloat("training_args", "learn_rate")
-        self.lr_multiplier = config.getfloat("training_args", "lr_multiplier")  # adaptively adjust the learning rate based on KL
-        self.temp = config.getfloat("training_args", "temp")  # the temperature param
-        self.n_playout = config.getint("training_args", "n_playout")  # num of simulations for each move
-        self.n_playout_pure_mcts = config.getint("training_args", "n_playout_pure_mcts") # num of pure MCTS eval simulations
-        self.c_puct = config.getfloat("training_args", "c_puct")
-        self.kl_targ = config.getfloat("training_args", "kl_targ")
-        
+        # DQN Args
+        self.lr = config.getfloat("training_args", "learn_rate")
+        self.gamma = config.getfloat("training_args", "gamma")
+        self.buffer_size = config.getint("training_args", "buffer_size")
+        self.eps_start = config.getfloat("training_args", "epsilon_start")
+        self.eps_end = config.getfloat("training_args", "epsilon_end")
+        self.eps_decay = config.getfloat("training_args", "epsilon_decay")
+        self.target_update_freq = config.getint("training_args", "target_update_freq")
+
         self.game_args = game_args
-        self.game = Game(**game_args)
         self.model = model
         self.dir_save = dir_save
         self.name = model.name
-        self.game_collector = GameCollector()
-        self.n_epoch = 0
-        self.best_win_ratio = 0.0
-    
-        self.mcts_player = mcts_alphazero(self.model.policy_value_fn,
-                                      c_puct=self.c_puct,
-                                      n_playout=self.n_playout,
-                                      selfplay=True)
+
+        self.replay_buffer = ReplayBuffer(self.buffer_size)
         self.writer = SummaryWriter(self.dir_save + self.name + "_" + datetime.datetime.now().strftime("%Y%m%d_%H%M%S"))
 
+        self.n_epoch = 0
+        self.global_step = 0
+        self.current_eps = 1
 
-    def train(self):
-        now_time = datetime.datetime.now().strftime("%Y%m%d_%H%M")
-        filepath = self.dir_save+self.name+"_gamebatch"+str(self.n_epoch)+"_"+str(now_time)+".pkl"
-        plays = self.game_collector.parallel_collect_selfplay(n_cores = self.n_cores, 
-                shared_model = self.model.policy_value_net, policy = self.mcts_player, batch_size = self.batch_size, filepath = filepath)
-        
-        _, _, state_batch_tmp, mcts_probs_batch_tmp, policy_grad_batch = zip(*plays)
-        state_vecs_batch = []
-        mcts_probs_batch = []
-        for state_vecs, mcts_probs in zip(state_batch_tmp, mcts_probs_batch_tmp):
-            state_vecs_batch.extend(state_vecs)
-            mcts_probs_batch.append(np.array(mcts_probs))
-        mcts_probs_batch = np.concatenate(mcts_probs_batch, axis=0)
-        policy_grad_batch = np.concatenate(policy_grad_batch, axis=0)
-        # print(len(state_batch), mcts_probs_batch.shape, policy_grad_batch.shape)
-        assert len(state_vecs_batch) == mcts_probs_batch.shape[0]
-        assert len(state_vecs_batch) == policy_grad_batch.shape[0]
+    def get_epsilon(self):
+        """Exponential decay for epsilon"""
+        return self.eps_end + (self.eps_start - self.eps_end) * \
+            np.exp(-1. * self.global_step / self.eps_decay)
 
-        vec_board_batch = np.stack((x[0] for x in state_vecs_batch), axis=0)
-        vec_state_batch = np.stack((x[1] for x in state_vecs_batch), axis=0)
-        state_batch = (vec_board_batch, vec_state_batch)
+    def train(self, training_side=WHITE):
+        # Collect Data (Self-Play)
+        # collect 'n_cores' games per epoch loop to add variety
+        self.current_eps = self.get_epsilon()
+        new_transitions, _ = GameCollector.parallel_collect_selfplay(
+            n_cores=self.n_cores,
+            shared_model=self.model.policy_net,
+            epsilon=self.current_eps,
+            batch_size=self.n_cores * 2, # size of batch
+            game_args=self.game_args,
+            training_side=training_side,
+            gamma=self.gamma
+        )
 
-        old_probs, old_v = self.model.policy_value_batch(state_batch)
-        for i in range(self.epochs):
-            loss, entropy = self.model.train_step(
-                    state_batch,
-                    mcts_probs_batch,
-                    policy_grad_batch,
-                    self.learn_rate*self.lr_multiplier)
-            new_probs, new_v = self.model.policy_value_batch(state_batch)
-            kl = np.mean(np.sum(old_probs * (
-                    np.log(old_probs + 1e-10) - np.log(new_probs + 1e-10)),
-                    axis=1)
-            )
-            if kl > self.kl_targ * 4:  # early stopping if D_KL diverges badly
-                break
-        # adaptively adjust the learning rate
-        if kl > self.kl_targ * 2 and self.lr_multiplier > 0.1:
-            self.lr_multiplier /= 1.5
-        elif kl < self.kl_targ / 2 and self.lr_multiplier < 10:
-            self.lr_multiplier *= 1.5
+        self.model.policy_net.to(device=self.model.device)
 
-        explained_var_old = (1 -
-                             np.var(np.array(policy_grad_batch) - old_v.flatten()) /
-                             np.var(np.array(policy_grad_batch)))
-        explained_var_new = (1 -
-                             np.var(np.array(policy_grad_batch) - new_v.flatten()) /
-                             np.var(np.array(policy_grad_batch)))
-        print(("kl:{:.5f},"
-               "lr_multiplier:{:.3f},"
-               "loss:{},"
-               "entropy:{},"
-               "explained_var_old:{:.3f},"
-               "explained_var_new:{:.3f}"
-               ).format(kl,
-                        self.lr_multiplier,
-                        loss,
-                        entropy,
-                        explained_var_old,
-                        explained_var_new))
-        self.writer.add_scalar("loss", loss, self.n_epoch)
-        self.writer.add_scalar("entropy", entropy, self.n_epoch)
-        self.writer.add_scalar("kl_between_probs", kl, self.n_epoch)
-        self.writer.add_scalar("lr_multiplier", self.lr_multiplier, self.n_epoch)
-        self.writer.add_scalar("explained_var_old", explained_var_old, self.n_epoch)
-        return loss, entropy
+        # Add to Buffer
+        for t in new_transitions:
+            self.replay_buffer.push(*t)
+
+        if len(self.replay_buffer) < self.batch_size:
+            return 0  # Not enough data
+
+        # Train Loop
+        total_loss = 0
+        q_max = -float('inf')
+        q_mean = 0
+        for _ in range(self.epochs):
+            # Sample Batch
+            #transitions = self.replay_buffer.sample(self.batch_size)
+            transitions, indices, weights = self.replay_buffer.sample(self.batch_size)
+            weights = torch.tensor(weights, dtype=torch.float32, device=self.model.device).unsqueeze(1)
+            # Transpose batch to (batch_board, batch_state, batch_action, ...)
+            batch = list(zip(*transitions))
+
+            # Stack numpy arrays
+            b_board = np.stack(batch[0])
+            b_state = np.stack(batch[1])
+            b_action = np.array(batch[2])
+            b_reward = np.array(batch[3])
+            b_next_board = np.stack(batch[4])
+            b_next_state = np.stack(batch[5])
+            b_done = np.array(batch[6], dtype=np.uint8)
+
+            batch_data = (b_board, b_state, b_action, b_reward, b_next_board, b_next_state, b_done)
+
+            loss, q_vals, td_errors = self.model.train_step(batch_data, self.gamma, self.lr, weights)
+            td_errors_np = td_errors.detach().abs().cpu().numpy().flatten()
+            self.replay_buffer.update_priorities(indices, td_errors_np)
+
+            total_loss += loss
+            q_max = max(q_max, q_vals.max().item())
+            q_mean += q_vals.mean().item()
+        q_mean /= self.epochs
+        avg_loss = total_loss / self.epochs
+        print(f"Epoch {self.n_epoch} | Buffer: {len(self.replay_buffer)} | Epsilon: {self.current_eps:.4f} | Avg loss: {avg_loss:.4f} | Q max: {q_max:.2f} | Q mean: {q_mean:.2f}")
+        self.writer.add_scalar("loss", avg_loss, self.n_epoch)
+        self.writer.add_scalar("epsilon", self.current_eps, self.n_epoch)
+
+        return avg_loss
 
     def run(self):
-        """run the training pipeline"""
+        """Main Loop"""
+        print("Starting DQN Training...")
+        n_playout = 25
+        mcts_side = BLACK
         for i in range(self.max_epoch):
             self.n_epoch += 1
-            print("New epoch:", self.n_epoch)
-            loss, entropy = self.train()
-            # check the performance of the current model,
-            # and save the model params
-            if (i+1) % self.check_freq == 0:
-                print("Start evaluation.")
-                current_mcts_player = mcts_alphazero(self.model.policy_value_fn, 
-                    c_puct=self.c_puct, n_playout=self.n_playout, selfplay=False)
-                pure_mcts_player = MCTS_pure(c_puct=self.c_puct, n_playout=self.n_playout_pure_mcts)
-                win_ratio = self.game_collector.parallel_eval(current_mcts_player, 
-                    self.model.policy_value_net, pure_mcts_player, self.n_cores, 
-                    self.n_eval_games, self.temp, self.game_args)
-                self.model.save(self.dir_save, self.n_epoch)
-                print("win ratio:", win_ratio, "#games:", 
-                    self.n_eval_games, "#pure mcts playout", self.n_playout_pure_mcts)
-                if win_ratio > self.best_win_ratio:
-                    print("New best model!")
-                    self.best_win_ratio = win_ratio
-                    self.model.save(self.dir_save, self.n_epoch, is_best=True)
-                    if (self.best_win_ratio == 1.0 and self.n_playout_pure_mcts < 10000):
-                        self.n_playout_pure_mcts += 1000
-                        self.best_win_ratio = 0.0
+            self.global_step += 1
 
+            loss = self.train()
+
+            # Sync Target Network
+            tau = 0.006  # can adjust 0.001–0.01
+            for target_param, online_param in zip(self.model.target_net.parameters(), self.model.policy_net.parameters()):
+                target_param.data.copy_(tau * online_param.data + (1.0 - tau) * target_param.data)
+            #if self.n_epoch % self.target_update_freq == 0:
+            #    self.model.sync_target_network()
+
+            # Checkpoint & Evaluate
+            if self.n_epoch % self.check_freq == 0:
+                print(f"Saving Checkpoint at epoch {self.n_epoch}", end=' - ')
+                self.model.save(self.dir_save, self.n_epoch)
+
+                mcts_player = MCTS_pure(c_puct=5, n_playout=n_playout)
+                n_playout = self.evaluate(n_playout, mcts_side, mcts_player, 100, model_name='mcts')
+
+
+    def evaluate(self, n_playout, opponent_side, opponent_player, evaluation_games=10, model_name='dqn'):
+        agent = DQNAgent(self.model.policy_net, epsilon=0.0, device=self.model.device)
+        wins = 0
+        draws = 0
+        losses = 0
+        reward = 0
+        for _ in range(evaluation_games):
+            # evaluation game against MCTS
+            game = Game(**self.game_args)
+            while True:
+                if game.current_player == opponent_side:
+                    move, _ = opponent_player.get_action(game)
+                    game_status = game.do_move(move)
+                else:
+                    move, _ = agent.get_action(game)
+                    game_status = game.do_move(move)
+
+                if game_is_over(game_status):
+                    break
+            # calculate reward
+            pieces = game.current_board.get_pieces()
+            mcts_pieces = len([x for x in pieces if x.player == opponent_side])
+            dqn_pieces = len(pieces) - mcts_pieces
+            reward += (12 - mcts_pieces) * PIECE_TAKEN
+            reward -= (12 - dqn_pieces) * PIECE_TAKEN
+            winner = game_winner(game_status)
+            if winner == 0:
+                draws += 1
+                reward += GAME_TIE
+            elif winner == opponent_side:
+                losses += 1
+                reward += GAME_LOSS
+            else:
+                wins += 1
+                reward += GAME_WIN
+        win_ratio = wins / evaluation_games
+        loss_ratio = losses / evaluation_games
+        avg_reward = reward / evaluation_games
+        self.writer.add_scalar(f"{model_name} avg_reward", avg_reward, self.n_epoch)
+        self.writer.add_scalar(f"{model_name} win_ratio", win_ratio, self.n_epoch)
+        self.writer.add_scalar(f"{model_name} loss_ratio", loss_ratio, self.n_epoch)
+        self.writer.add_scalar(f"{model_name} mcts_n_playout", n_playout, self.n_epoch)
+        print(f'<{model_name}> Evaluation win ratio: {win_ratio:.2f} | Evaluation loss ratio: {loss_ratio:.2f} | Avg reward: {avg_reward:.4f} | mcts_n_playout: {n_playout}')
+        if win_ratio > 0.75:
+            n_playout *= 2
+        return min(n_playout, 10000)

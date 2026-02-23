@@ -368,7 +368,7 @@ def state2vec(state):
                 vec_board[2][pos] = 1
     vec_board = vec_board.reshape((4, nsize, nsize))
     vec_state = np.zeros(3+nsize*2)
-    vec_state[0] = 1 if state.current_player == WHITE else BLACK
+    vec_state[0] = 0 #1 if state.current_player == WHITE else BLACK
     vec_state[1] = state.is_chain_taking
     for i, move in enumerate(state.chain_taking_moves):
         vec_state[i+2] = move.taken_pos-1
@@ -402,8 +402,8 @@ def set_board(boardsize = CONST_N_GRID_64):
 set_rule()
 set_board()
 
-print("rule", current_rule)
-print("board", current_borad)
+#print("rule", current_rule)
+#print("board", current_borad)
 
 
 def get_env_args():

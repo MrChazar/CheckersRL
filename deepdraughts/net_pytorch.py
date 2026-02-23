@@ -6,6 +6,8 @@ import torch.nn.functional as F
 import numpy as np
 import os
 import datetime
+import copy
+
 
 def set_learning_rate(optimizer, lr):
     """Sets the learning rate to the given value"""
@@ -15,63 +17,49 @@ def set_learning_rate(optimizer, lr):
 
 def _initialize_weights(self):
     for m in self.modules():
-        if isinstance(m, nn.Linear):
-            weight = (param.data for name, param in m.named_parameters() if "weight" in name)
-            for w in weight:
-                torch.nn.init.xavier_uniform_(m.weight)
-
-        if isinstance(m, torch.nn.LSTM):
-            ih = (param.data for name, param in self.named_parameters() if 'weight_ih' in name)
-            hh = (param.data for name, param in self.named_parameters() if 'weight_hh' in name)
-            for w in ih:
-                nn.init.xavier_uniform(w)
-            for w in hh:
-                nn.init.orthogonal(w)
-
-        if isinstance(m, torch.nn.Conv2d):
-            weight = (param.data for name, param in m.named_parameters() if "weight" in name)
-            for w in weight:
-                torch.nn.init.xavier_uniform_(m.weight)
-
-        # b = (param.data for name, param in self.named_parameters() if 'bias' in name)
-        # for w in b:
-        #     nn.init.constant(w, 0)
-
-    print(self.__class__.__name__ + ":\n" + str(list(self.modules())[0]))
+        if isinstance(m, nn.Conv2d):
+            nn.init.xavier_uniform_(m.weight)
+        elif isinstance(m, nn.Linear):
+            nn.init.xavier_uniform_(m.weight)
 
 
-class PolicyValueNet(nn.Module):
-    """policy-value network module"""
+class DQNNet(nn.Module):
+    """DQN Network: Input (Board, State) -> Output (Q-values for all actions)"""
+
     def __init__(self, nsize, n_states, n_actions):
-        super(PolicyValueNet, self).__init__()
+        super(DQNNet, self).__init__()
 
         self.board_width = nsize
         self.board_height = nsize
         self.n_states = n_states
         self.n_actions = n_actions
 
-        # common layers
-        self.conv1 = nn.Conv2d(4, 32, kernel_size=3, padding=2) # nxn -> (n+2) x (n+2)
+        # Feature Extractor (CNN)
+        self.conv1 = nn.Conv2d(4, 32, kernel_size=3, padding=1)
         self.bn1 = nn.BatchNorm2d(32)
-        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, padding=1) # (n+2) x (n+2) -> (n+2) x (n+2)
+        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
         self.bn2 = nn.BatchNorm2d(64)
-        self.conv3 = nn.Conv2d(64, 128, kernel_size=3, padding=1) #(n+2) x (n+2) -> (n+2) x (n+2)
+        self.conv3 = nn.Conv2d(64, 128, kernel_size=3, padding=1)
         self.bn3 = nn.BatchNorm2d(128)
-        self.conv4 = nn.Conv2d(128, 128, kernel_size=3, padding=0) # (n+2) x (n+2) -> nxn
-        self.bn4 = nn.BatchNorm2d(128)
 
-        # state layers
+        # State processing
         self.st_fc1 = nn.Linear(n_states, 64)
-        self.st_fc2 = nn.Linear(64, 64)
 
-        # action policy layers
-        self.act_conv1 = nn.Conv2d(128, 4, kernel_size=1)
-        self.act_fc1 = nn.Linear(4*nsize*nsize+64, n_actions)
+        # linear
+        #self.fc_common = nn.Linear(128 * nsize * nsize + 64, 512)
+        #self.fc_q_head = nn.Linear(512, n_actions)
 
-        # state value layers
-        self.val_conv1 = nn.Conv2d(128, 2, kernel_size=1)
-        self.val_fc1 = nn.Linear(2*nsize*nsize+64, 64)
-        self.val_fc2 = nn.Linear(64, 1)
+        # ending layers of standard DQN above (commented out)
+        # ending layers implementing dueling DQN below
+        self.fc_common = nn.Linear(128 * nsize * nsize + 64, 512)
+
+        # Value stream
+        self.fc_value = nn.Linear(512, 256)
+        self.value_head = nn.Linear(256, 1)
+
+        # Advantage stream
+        self.fc_adv = nn.Linear(512, 256)
+        self.adv_head = nn.Linear(256, n_actions)
 
         _initialize_weights(self)
 
@@ -80,185 +68,163 @@ class PolicyValueNet(nn.Module):
             vec_board = torch.unsqueeze(vec_board, 0)
             vec_state = torch.unsqueeze(vec_state, 0)
 
-        # common layers
-        x = F.relu(self.conv1(vec_board))
-        x = self.bn1(x)
-        x = F.relu(self.conv2(x))
-        x = self.bn2(x)
-        x = F.relu(self.conv3(x))
-        x = self.bn3(x)
-        x = F.relu(self.conv4(x))
-        x = self.bn4(x)
+        # CNN Path
+        x = F.relu(self.bn1(self.conv1(vec_board)))
+        x = F.relu(self.bn2(self.conv2(x)))
+        x = F.relu(self.bn3(self.conv3(x)))
 
+        x = x.view(x.size(0), -1)  # Flatten
+
+        # State Path
         y = F.relu(self.st_fc1(vec_state))
-        y = F.relu(y)
 
-        # action policy layers
-        x_act = F.relu(self.act_conv1(x))
-        x_act = x_act.view(-1, 4*self.board_width*self.board_height)
-        x_act = torch.cat((x_act, y), -1)
+        # Merge
+        combined = torch.cat((x, y), 1)
 
-        x_act = F.log_softmax(self.act_fc1(x_act))
+        # Q-Values
+        #feat = F.relu(self.fc_common(combined))
+        #q_values = self.fc_q_head(feat)
 
-        # state value layers
-        x_val = F.relu(self.val_conv1(x))
-        x_val = x_val.view(-1, 2*self.board_width*self.board_height)
-        x_val = torch.cat((x_val, y), -1)
-        x_val = F.relu(self.val_fc1(x_val))
-        x_val = F.tanh(self.val_fc2(x_val))
+        # Q-Values part implementation in standard DQN above (commented out)
+        # Q-Values part implementation in dueling DQN part below
+        feat = F.relu(self.fc_common(combined))
 
-        return x_act, x_val
+        # Value stream
+        value = F.relu(self.fc_value(feat))
+        value = self.value_head(value)  # shape: (batch, 1)
 
-"""
-Here is a sample model that use 
-"""
+        # Advantage stream
+        adv = F.relu(self.fc_adv(feat))
+        adv = self.adv_head(adv)  # shape: (batch, n_actions)
+
+        # Combine streams
+        q_values = value + (adv - adv.mean(dim=1, keepdim=True))
+
+        return q_values
+
+
 class Model():
-    """policy-value network """
-    def __init__(self, env_args, name = "default", 
-                use_gpu = False, l2_const = 1e-4):
+    """DQN Model Handler with Target Network"""
+
+    def __init__(self, env_args, name="dqn_default", device='cpu', l2_const=1e-4):
         nsize, _, n_states, n_actions = env_args
-        # nsize: board is nsize x nsize.
-        # ngrids: #grids of board
-        # n_actions: #number of actions
         self.nsize = nsize
         self.n_states = n_states
         self.n_actions = n_actions
-        self.board_width = nsize
-        self.board_height = nsize
-
         self.name = name
-        self.checkpoint_n_epoch = None
-        self.use_gpu = use_gpu
+        self.device = device
         self.l2_const = l2_const
 
-        self.policy_value_net = PolicyValueNet(nsize, n_states, n_actions)
-        if self.use_gpu:
-            self.policy_value_net = self.policy_value_net.cuda()
+        # Policy Network (Training)
+        self.policy_net = DQNNet(nsize, n_states, n_actions)
+        # Target Network (Stable targets)
+        self.target_net = DQNNet(nsize, n_states, n_actions)
 
-        self.optimizer = optim.Adam(self.policy_value_net.parameters(),
-                                    weight_decay=self.l2_const)
+        self.policy_net = self.policy_net.to(device=self.device)
+        self.target_net = self.target_net.to(device=self.device)
 
+        self.target_net.load_state_dict(self.policy_net.state_dict())
+        self.target_net.eval()  # Target net is never trained directly !!!!
 
-    def policy_value_fn(self, state):
+        self.optimizer = optim.Adam(self.policy_net.parameters(), weight_decay=self.l2_const, )
+
+    def sync_target_network(self):
+        """Copy weights from policy net to target net"""
+        self.target_net.load_state_dict(self.policy_net.state_dict())
+        print("Target Network Synced.")
+
+    def train_step(self, batch_data, gamma, lr, weights):
         """
-        input: state
-        output: a list of (action, probability) tuples for each available
-        action and the score of the board state
+        Perform a single training step using a batch of data.
+        batch_data: (b_board, b_state, b_action, b_reward, b_next_board, b_next_state, b_done)
         """
-        legal_positions = state.get_all_available_moves()
-        legal_position_ids = [x.id() for x in legal_positions]
-        vec_board, vec_state = state.to_vector()
-        if self.use_gpu:
-            log_act_probs, value = self.policy_value_net(
-                    torch.from_numpy(vec_board).cuda().float(), 
-                    torch.from_numpy(vec_state).cuda().float())
-            act_probs = np.exp(log_act_probs.data.cpu().numpy().flatten())
-            value = value.data[0][0].cpu()
-        else:
-            log_act_probs, value = self.policy_value_net(
-                    torch.from_numpy(vec_board).float(),
-                    torch.from_numpy(vec_state).float())
-            act_probs = np.exp(log_act_probs.data.numpy().flatten())
-            value = value.data[0][0]
-        act_probs = zip(legal_positions, act_probs[legal_position_ids])
-        return act_probs, value.item()
+        b_board, b_state, b_action, b_reward, b_next_board, b_next_state, b_done = batch_data
 
-    def policy_value_batch(self, state_batch):
-        """
-        input: a batch of states
-        output: a batch of action probabilities and state values
-        """
-        vec_board_batch, vec_state_batch = state_batch
-        vec_board_batch = torch.from_numpy(vec_board_batch).float()
-        vec_state_batch = torch.from_numpy(vec_state_batch).float()
+        # Convert to tensors
+        state_board = torch.from_numpy(b_board).float()
+        state_extra = torch.from_numpy(b_state).float()
+        action = torch.from_numpy(b_action).long().unsqueeze(1)  # [Batch, 1]
+        reward = torch.from_numpy(b_reward).float().unsqueeze(1)
+        next_board = torch.from_numpy(b_next_board).float()
+        next_extra = torch.from_numpy(b_next_state).float()
+        done = torch.from_numpy(b_done).float().unsqueeze(1)
 
-        if self.use_gpu:
-            vec_board_batch = vec_board_batch.cuda()
-            vec_state_batch = vec_state_batch.cuda()
-            log_act_probs, value = self.policy_value_net(vec_board_batch, vec_state_batch)
-            act_probs = np.exp(log_act_probs.data.cpu().numpy())
-            return act_probs, value.data.cpu().numpy()
-        else:
-            log_act_probs, value = self.policy_value_net(vec_board_batch, vec_state_batch)
-            act_probs = np.exp(log_act_probs.data.numpy())
-            return act_probs, value.data.numpy()
+        state_board, state_extra = state_board.to(device=self.device), state_extra.to(device=self.device)
+        action, reward = action.to(device=self.device), reward.to(device=self.device)
+        next_board, next_extra = next_board.to(device=self.device), next_extra.to(device=self.device)
+        done = done.to(device=self.device)
 
-
-    def train_step(self, state_batch, mcts_probs_batch, policy_grad_batch, lr):
-        """perform a training step"""
-        vec_board_batch, vec_state_batch = state_batch
-        vec_board_batch = torch.from_numpy(vec_board_batch).float()
-        vec_state_batch = torch.from_numpy(vec_state_batch).float()
-        mcts_probs_batch = torch.from_numpy(mcts_probs_batch).float()
-        policy_grad_batch = torch.from_numpy(policy_grad_batch).float()
-
-        if self.use_gpu:
-            vec_board_batch = vec_board_batch.cuda()
-            vec_state_batch = vec_state_batch.cuda()
-            mcts_probs_batch = mcts_probs_batch.cuda()
-            policy_grad_batch = policy_grad_batch.cuda()
-            
-        # zero the parameter gradients
         self.optimizer.zero_grad()
-        # set learning rate
         set_learning_rate(self.optimizer, lr)
 
-        # forward
-        log_act_probs, value = self.policy_value_net(vec_board_batch, vec_state_batch)
+        # Calculate current Q(s, a)
+        # We gather the Q-value corresponding to the taken action
+        q_values = self.policy_net(state_board, state_extra)
+        q_val = q_values.gather(1, action)
 
-        # define the loss = (z - v)^2 - pi^T * log(p) + c||theta||^2
-        # Note: the L2 penalty is incorporated in optimizer
-        value_loss = F.mse_loss(value.view(-1), policy_grad_batch)
-        policy_loss = -torch.mean(torch.sum(mcts_probs_batch*log_act_probs, 1))
-        loss = value_loss + policy_loss
-        # backward and optimize
+        # Calculate Max Q(s', a') from Target Net
+        #with torch.no_grad():
+        #    # it corespondends to bellman equation i highly recommend to check presentation
+        #    next_q_values = self.target_net(next_board, next_extra)
+        #    next_q_max = next_q_values.max(1)[0].unsqueeze(1)
+        #    expected_q_val = reward + (gamma * next_q_max * (1 - done))
+        with torch.no_grad():
+            # Step 1: choose best action from online net
+            next_q_online = self.policy_net(next_board, next_extra)
+            next_actions = next_q_online.argmax(1, keepdim=True)
+
+            # Step 2: evaluate that action with target net
+            next_q_target = self.target_net(next_board, next_extra)
+            next_q_value = next_q_target.gather(1, next_actions)
+
+            # Step 3: compute expected Q
+            expected_q_val = reward + (gamma ** 4) * next_q_value * (1 - done)
+
+        # Loss (MSE) between policy and target net
+        # we will use it for gradient descent !
+        #loss = F.smooth_l1_loss(q_val, expected_q_val)
+        td_errors = q_val - expected_q_val
+
+        # Huber loss per sample (no reduction!)
+        loss_per_sample = F.smooth_l1_loss(q_val, expected_q_val, reduction='none')
+
+        # Apply importance sampling weights
+        loss = (weights * loss_per_sample).mean()
+
+        self.optimizer.zero_grad()
         loss.backward()
+        # Gradient clipping to prevent exploding gradients
+        for param in self.policy_net.parameters():
+            param.grad.data.clamp_(-1, 1)
+        #torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), 5.0)
         self.optimizer.step()
-        # calc policy entropy, for monitoring only
-        entropy = -torch.mean(
-                torch.sum(torch.exp(log_act_probs) * log_act_probs, 1)
-                )
-        return loss.item(), entropy.item()
+
+        return loss.item(), next_q_online, td_errors
 
     def save(self, checkpoint_dir, epoch, is_best=False):
-        """ save model params to file """
         now_time = datetime.datetime.now().strftime("%Y%m%d_%H%M")
-        if is_best:
-            savepath = os.path.join(checkpoint_dir, self.name+'_epoch{}_{}_best.pth.tar'.format(epoch, now_time))
-        else:
-            savepath = os.path.join(checkpoint_dir, self.name+'_epoch{}_{}.pth.tar'.format(epoch, now_time))
-        torch.save({
-                    'nsize': self.nsize,
-                    'n_states': self.n_states, 
-                    'n_actions': self.n_actions, 
-                    'name': self.name, 
-                    'n_epoch': epoch, 
-                    'use_gpu': self.use_gpu, 
-                    'l2_const': self.l2_const, 
+        name = self.name + "_best" if is_best else self.name
+        savepath = os.path.join(checkpoint_dir, '{}_epoch{}_{}.pth.tar'.format(name, epoch, now_time))
 
-                    'model': self.policy_value_net.state_dict(),
-                    'optimizer': self.optimizer.state_dict(),
-                    },
-                    savepath)
+        torch.save({
+            'nsize': self.nsize,
+            'n_states': self.n_states,
+            'n_actions': self.n_actions,
+            'name': self.name,
+            'n_epoch': epoch,
+            'device': self.device,
+            'l2_const': self.l2_const,
+            'model': self.policy_net.state_dict(),
+            'optimizer': self.optimizer.state_dict(),
+        }, savepath)
 
     @classmethod
-    def load_checkpoint(self, model_file):
-        model_params = torch.load(model_file)
-
-        nsize = model_params['nsize']
-        n_states = model_params['n_states']
-        n_actions = model_params['n_actions']
-
-        name = model_params['name']
-        checkpoint_n_epoch = model_params['n_epoch']
-        use_gpu = model_params['use_gpu']
-        l2_const = model_params['l2_const']
-        env_args = (nsize, None, n_states, n_actions)
-
-        model = Model(env_args, name, use_gpu, l2_const)
-        model.checkpoint_n_epoch = checkpoint_n_epoch
-        model.policy_value_net.load_state_dict(model_params['model'])
+    def load(cls, model_file, device='cpu'):
+        # Implementation similar to the original code, adapted for DQN
+        model_params = torch.load(model_file, map_location=torch.device(device=device))
+        env_args = (model_params['nsize'], model_params['device'], model_params['n_states'], model_params['n_actions'])
+        model = Model(env_args, model_params['name'], device, model_params['l2_const'])
+        model.policy_net.load_state_dict(model_params['model'])
+        model.target_net.load_state_dict(model_params['model'])  # Sync target on load
         model.optimizer.load_state_dict(model_params['optimizer'])
         return model
-        
-

@@ -149,7 +149,7 @@ class GUI():
         pg.init()
         self.screen = pg.display.set_mode((self.screen_size + self.text_size, self.screen_size))
         self.surface = pg.Surface((self.screen_size + self.text_size, self.screen_size))
-        pg.display.set_caption('DeepDraughts')
+        pg.display.set_caption('deepdraughts')
         clock = pg.time.Clock()
 
         pg.font.init()
@@ -214,7 +214,7 @@ class GUI():
         pg.init()
         self.screen = pg.display.set_mode((self.screen_size + self.text_size, self.screen_size))
         self.surface = pg.Surface((self.screen_size + self.text_size, self.screen_size))
-        pg.display.set_caption('DeepDraughts')
+        pg.display.set_caption('deepdraughts')
         clock = pg.time.Clock()
 
         pg.font.init()
