@@ -31,6 +31,7 @@ class TrainPipeline():
         self.eps_end = config.getfloat("training_args", "epsilon_end")
         self.eps_decay = config.getfloat("training_args", "epsilon_decay")
         self.target_update_freq = config.getint("training_args", "target_update_freq")
+        self.n_steps = config.getint("model_args", "n_steps")
 
         self.game_args = game_args
         self.model = model
@@ -60,6 +61,7 @@ class TrainPipeline():
             batch_size=self.n_cores * 2, # size of batch
             game_args=self.game_args,
             training_side=training_side,
+            n_steps=self.n_steps,
             gamma=self.gamma
         )
 
@@ -95,7 +97,7 @@ class TrainPipeline():
 
             batch_data = (b_board, b_state, b_action, b_reward, b_next_board, b_next_state, b_done)
 
-            loss, q_vals, td_errors = self.model.train_step(batch_data, self.gamma, self.lr, weights)
+            loss, q_vals, td_errors = self.model.train_step(batch_data, self.gamma, self.lr, weights, self.n_steps)
             td_errors_np = td_errors.detach().abs().cpu().numpy().flatten()
             self.replay_buffer.update_priorities(indices, td_errors_np)
 

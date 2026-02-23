@@ -133,7 +133,7 @@ class Model():
         self.target_net.load_state_dict(self.policy_net.state_dict())
         print("Target Network Synced.")
 
-    def train_step(self, batch_data, gamma, lr, weights):
+    def train_step(self, batch_data, gamma, lr, weights, n_steps):
         """
         Perform a single training step using a batch of data.
         batch_data: (b_board, b_state, b_action, b_reward, b_next_board, b_next_state, b_done)
@@ -178,7 +178,7 @@ class Model():
             next_q_value = next_q_target.gather(1, next_actions)
 
             # Step 3: compute expected Q
-            expected_q_val = reward + (gamma ** 4) * next_q_value * (1 - done)
+            expected_q_val = reward + (gamma ** n_steps) * next_q_value * (1 - done)
 
         # Loss (MSE) between policy and target net
         # we will use it for gradient descent !

@@ -24,7 +24,7 @@ class GameCollector():
         return pieces_taken
 
     @classmethod
-    def self_play(cls, shared_net, epsilon, game_args=dict(), shared_database=None, training_side=WHITE, gamma=0.99):
+    def self_play(cls, shared_net, epsilon, game_args=dict(), shared_database=None, training_side=WHITE, n_steps=1, gamma=0.99):
         """
         Play one game using DQN Agent (Self-play).
         Returns list of transitions: [(s, a, r, s', done), ...]
@@ -85,7 +85,7 @@ class GameCollector():
             done_n = False
 
             k = 0
-            for step in range(4):
+            for step in range(n_steps):
                 if t + step >= total_moves:
                     break
 
@@ -108,52 +108,6 @@ class GameCollector():
             transitions.append(
                 (s_board, s_state, a, R, ns_board, ns_state, done_n)
             )
-
-            """s_board, s_extra = states[i]
-            a = actions[i]
-            player = players[i]
-
-            # Determining Next State:
-            # In self-play, s' we use immediate next state (t+1) which is opponent's turn.
-            if i < total_moves - 1:
-                ns_board, ns_extra = states[i + 1]
-                done = False
-            else:
-                # Terminal state is the one resulting from the last move
-                # But we can assume next_state is zeros or handled by 'done' flag
-                ns_board, ns_extra = np.zeros_like(s_board), np.zeros_like(s_extra)
-                done = True
-            #p = game.current_board.get_pieces()[0].player
-
-            # Reward Logic
-            reward = 0
-            if is_draw:
-                reward += GAME_TIE  # maybe we could use minor penalty ?!?
-            else:
-                if player == winner:
-                    if done: reward += GAME_WIN
-                else:
-                    if done: reward += GAME_LOSS
-
-            # logic to reward taking pieces
-            opponent = -player
-
-            prev_count = cls.count_pieces(s_board, opponent)
-            next_count = cls.count_pieces(ns_board, opponent)
-
-            number_of_pieces_captured = int(prev_count - next_count)
-            if number_of_pieces_captured > 0:
-                capture_reward = PIECE_TAKEN * number_of_pieces_captured
-                if player == training_side:
-                    reward += capture_reward
-                else:
-                    reward -= capture_reward
-
-            # Optionally: Add small penalty for living too long to encourage fast wins?
-            # reward -= 0.01
-
-            transitions.append((s_board, s_extra, a, reward, ns_board, ns_extra, done))
-"""
         return transitions, winner
 
     @classmethod
@@ -166,7 +120,7 @@ class GameCollector():
 
     @classmethod
     def parallel_collect_selfplay(cls, n_cores, shared_model, epsilon, batch_size,
-                                  game_args=dict(), filepath=None, training_side=WHITE, gamma=0.99):
+                                  game_args=dict(), filepath=None, training_side=WHITE, n_steps=1, gamma=0.99):
         """
         Runs multiple self-play games in parallel to fill the buffer.
         """
@@ -185,7 +139,7 @@ class GameCollector():
             n_games_to_play = batch_size  # batch_size is a of num_games !
 
             for _ in range(n_games_to_play):
-                res = pool.apply_async(cls.self_play, (shared_model, epsilon, game_args, shared_database, training_side, gamma))
+                res = pool.apply_async(cls.self_play, (shared_model, epsilon, game_args, shared_database, training_side, n_steps, gamma))
                 results.append(res)
 
             pool.close()
