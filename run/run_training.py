@@ -17,17 +17,17 @@ def run_train_pipline(config):
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
 
-    checkpoint = config.get("model_args", "checkpoint")
-    name = config.get("model_args", "name")
-    device = config.get("model_args", "device")
-    l2_const = config.getfloat("model_args", "l2_const")
+    checkpoint = config.get("model_args", "checkpoint", fallback=None)
+    name = config.get("model_args", "name", fallback="DQN")
+    device = config.get("model_args", "device", fallback="cuda")
+    l2_const = config.getfloat("model_args", "l2_const", fallback=0)
 
     if not checkpoint:
         env_args = get_env_args()
-        print("new model start")
+        print(f"Starting new model {name} | device: {device}")
         model = Model(env_args, name=name, device=device, l2_const=l2_const)
     else:
-        print(f"Loaded model from {checkpoint}")
+        print(f"Loaded model from {checkpoint} | device: {device}")
         model = Model.load(checkpoint)
 
     training_pipeline = TrainPipeline(model, save_dir, config)
