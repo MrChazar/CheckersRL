@@ -1,36 +1,51 @@
-
-
 import configparser
+import os
+import torch
 from deepdraughts.env import *
-from deepdraughts.net_pytorch import Model
+from deepdraughts.ppo_net import PPOModel
 from deepdraughts.train_pipeline import TrainPipeline
 
-def run_train_pipline(config):
+
+def run_train_pipeline(config):
     save_dir = "../savedata/"
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
 
-    checkpoint = config.get("model_args", "checkpoint")
-    name = config.get("model_args", "name")
-    use_gpu = config.getboolean("model_args", "use_gpu")
-    print(use_gpu)
-    l2_const = config.getfloat("model_args", "l2_const")
+    checkpoint = config.get("model_args", "checkpoint", fallback=None)
+    name = config.get("model_args", "name", fallback="PPO_Checkers")
 
-    if not checkpoint:
+    requested_device = config.get("model_args", "device", fallback="cuda")
+    device = "cuda" if requested_device == "cuda" and torch.cuda.is_available() else "cpu"
+
+    lr = config.getfloat("training_args", "learn_rate", fallback=3e-4)
+
+    if not checkpoint or not os.path.exists(checkpoint):
         env_args = get_env_args()
-        model = Model(env_args, name = name, use_gpu = use_gpu, l2_const = l2_const)
+        print(f"Starting new model {name} | device: {device}")
+        model = PPOModel(env_args, name=name, device=device, lr=lr)
     else:
-        model = Model.load(checkpoint)
+        print(f"Loaded model from {checkpoint} | device: {device}")
+        model = PPOModel.load(checkpoint, device)
 
     training_pipeline = TrainPipeline(model, save_dir, config)
     training_pipeline.run()
 
+
 if __name__ == "__main__":
-    conf_ini = "./config.ini"
+    try:
+        import torch.multiprocessing as mp
+
+        mp.set_start_method('spawn', force=True)
+    except RuntimeError:
+        pass
+
     config = configparser.ConfigParser()
-    config.read(conf_ini, encoding="utf-8")
+    config.read("./config.ini", encoding="utf-8")
 
-
-    # train your own model
     import multiprocessing
+
     manager = multiprocessing.Manager()
+
     init_endgame_database(manager)
-    run_train_pipline(config)
+
+    run_train_pipeline(config)

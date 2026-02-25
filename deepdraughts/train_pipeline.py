@@ -1,141 +1,121 @@
-# -*- coding: utf-8 -*-
-
-from __future__ import print_function
-import random
 import numpy as np
-from collections import defaultdict
+import torch
 from tensorboardX import SummaryWriter
-
 import datetime
-from .mcts_pure import MCTSPlayer as MCTS_pure
-from .mcts_alphazero import MCTSPlayer_alphazero as mcts_alphazero
-from .game_collector import GameCollector
-from .env import Game
+from .ppo import RolloutBuffer, PPOAgent
+from .game_collector import GameCollector, GAME_WIN, GAME_TIE, GAME_LOSS, PIECE_TAKEN
+from .env import Game, game_is_over, game_winner, WHITE, BLACK
+from deepdraughts.mcts_pure import MCTSPlayer as MCTS_pure
+
 
 class TrainPipeline():
-    def __init__(self, model, dir_save, config, game_args = dict()):
+    def __init__(self, model, dir_save, config, game_args=dict()):
         self.max_epoch = config.getint("training_args", "max_epoch")
-        self.batch_size = config.getint("training_args", "batch_size")  # mini-batch size for training
-        self.n_cores = config.getint("training_args", "n_cores") # number of cores for
-        self.epochs = config.getint("training_args", "epochs")  # num of train_steps for each update
+        self.batch_size = config.getint("training_args", "batch_size")
+        self.n_cores = config.getint("training_args", "n_cores")
+        self.epochs = config.getint("training_args", "epochs")  # PPO Epochs
         self.check_freq = config.getint("training_args", "check_freq")
-        self.n_eval_games = config.getint("training_args", "n_eval_games")
-
-        self.learn_rate =config.getfloat("training_args", "learn_rate")
-        self.lr_multiplier = config.getfloat("training_args", "lr_multiplier")  # adaptively adjust the learning rate based on KL
-        self.temp = config.getfloat("training_args", "temp")  # the temperature param
-        self.n_playout = config.getint("training_args", "n_playout")  # num of simulations for each move
-        self.n_playout_pure_mcts = config.getint("training_args", "n_playout_pure_mcts") # num of pure MCTS eval simulations
-        self.c_puct = config.getfloat("training_args", "c_puct")
-        self.kl_targ = config.getfloat("training_args", "kl_targ")
-        
         self.game_args = game_args
-        self.game = Game(**game_args)
         self.model = model
         self.dir_save = dir_save
         self.name = model.name
-        self.game_collector = GameCollector()
-        self.n_epoch = 0
-        self.best_win_ratio = 0.0
-    
-        self.mcts_player = mcts_alphazero(self.model.policy_value_fn,
-                                      c_puct=self.c_puct,
-                                      n_playout=self.n_playout,
-                                      selfplay=True)
+
+        self.rollout_buffer = RolloutBuffer()
         self.writer = SummaryWriter(self.dir_save + self.name + "_" + datetime.datetime.now().strftime("%Y%m%d_%H%M%S"))
+        self.n_epoch = 0
 
+    def train(self, training_side=WHITE):
+        # collecting data for rollouts
+        raw_rollouts, _ = GameCollector.parallel_collect_selfplay(
+            n_cores=self.n_cores,
+            shared_model=self.model.policy_net,
+            batch_size=self.n_cores * 2,
+            game_args=self.game_args,
+            training_side=training_side
+        )
 
-    def train(self):
-        now_time = datetime.datetime.now().strftime("%Y%m%d_%H%M")
-        filepath = self.dir_save+self.name+"_gamebatch"+str(self.n_epoch)+"_"+str(now_time)+".pkl"
-        plays = self.game_collector.parallel_collect_selfplay(n_cores = self.n_cores, 
-                shared_model = self.model.policy_value_net, policy = self.mcts_player, batch_size = self.batch_size, filepath = filepath)
-        
-        _, _, state_batch_tmp, mcts_probs_batch_tmp, policy_grad_batch = zip(*plays)
-        state_vecs_batch = []
-        mcts_probs_batch = []
-        for state_vecs, mcts_probs in zip(state_batch_tmp, mcts_probs_batch_tmp):
-            state_vecs_batch.extend(state_vecs)
-            mcts_probs_batch.append(np.array(mcts_probs))
-        mcts_probs_batch = np.concatenate(mcts_probs_batch, axis=0)
-        policy_grad_batch = np.concatenate(policy_grad_batch, axis=0)
-        # print(len(state_batch), mcts_probs_batch.shape, policy_grad_batch.shape)
-        assert len(state_vecs_batch) == mcts_probs_batch.shape[0]
-        assert len(state_vecs_batch) == policy_grad_batch.shape[0]
+        self.model.policy_net.to(device=self.model.device)
 
-        vec_board_batch = np.stack((x[0] for x in state_vecs_batch), axis=0)
-        vec_state_batch = np.stack((x[1] for x in state_vecs_batch), axis=0)
-        state_batch = (vec_board_batch, vec_state_batch)
+        # mapping data
+        self.rollout_buffer.clear()
+        self.rollout_buffer.boards = raw_rollouts['b']
+        self.rollout_buffer.states = raw_rollouts['s']
+        self.rollout_buffer.actions = raw_rollouts['a']
+        self.rollout_buffer.logprobs = raw_rollouts['lp']
+        self.rollout_buffer.rewards = raw_rollouts['r']
+        self.rollout_buffer.values = raw_rollouts['v']
+        self.rollout_buffer.dones = raw_rollouts['d']
+        self.rollout_buffer.masks = raw_rollouts['m']
+        self.rollout_buffer.advantages = raw_rollouts['adv']
+        self.rollout_buffer.returns = raw_rollouts['ret']
 
-        old_probs, old_v = self.model.policy_value_batch(state_batch)
-        for i in range(self.epochs):
-            loss, entropy = self.model.train_step(
-                    state_batch,
-                    mcts_probs_batch,
-                    policy_grad_batch,
-                    self.learn_rate*self.lr_multiplier)
-            new_probs, new_v = self.model.policy_value_batch(state_batch)
-            kl = np.mean(np.sum(old_probs * (
-                    np.log(old_probs + 1e-10) - np.log(new_probs + 1e-10)),
-                    axis=1)
-            )
-            if kl > self.kl_targ * 4:  # early stopping if D_KL diverges badly
-                break
-        # adaptively adjust the learning rate
-        if kl > self.kl_targ * 2 and self.lr_multiplier > 0.1:
-            self.lr_multiplier /= 1.5
-        elif kl < self.kl_targ / 2 and self.lr_multiplier < 10:
-            self.lr_multiplier *= 1.5
+        if len(self.rollout_buffer.boards) < self.batch_size:
+            return 0
 
-        explained_var_old = (1 -
-                             np.var(np.array(policy_grad_batch) - old_v.flatten()) /
-                             np.var(np.array(policy_grad_batch)))
-        explained_var_new = (1 -
-                             np.var(np.array(policy_grad_batch) - new_v.flatten()) /
-                             np.var(np.array(policy_grad_batch)))
-        print(("kl:{:.5f},"
-               "lr_multiplier:{:.3f},"
-               "loss:{},"
-               "entropy:{},"
-               "explained_var_old:{:.3f},"
-               "explained_var_new:{:.3f}"
-               ).format(kl,
-                        self.lr_multiplier,
-                        loss,
-                        entropy,
-                        explained_var_old,
-                        explained_var_new))
-        self.writer.add_scalar("loss", loss, self.n_epoch)
-        self.writer.add_scalar("entropy", entropy, self.n_epoch)
-        self.writer.add_scalar("kl_between_probs", kl, self.n_epoch)
-        self.writer.add_scalar("lr_multiplier", self.lr_multiplier, self.n_epoch)
-        self.writer.add_scalar("explained_var_old", explained_var_old, self.n_epoch)
-        return loss, entropy
+        avg_loss, p_loss, v_loss = self.model.update(self.rollout_buffer, self.epochs, self.batch_size)
+
+        print(
+            f"Epoch {self.n_epoch} | Rollout size: {len(self.rollout_buffer.boards)} | Loss: {avg_loss:.4f} | Actor: {p_loss:.4f} | Critic: {v_loss:.4f}")
+        self.writer.add_scalar("loss/total", avg_loss, self.n_epoch)
+        self.writer.add_scalar("loss/policy", p_loss, self.n_epoch)
+        self.writer.add_scalar("loss/value", v_loss, self.n_epoch)
+
+        return avg_loss
 
     def run(self):
-        """run the training pipeline"""
+        print("Starting PPO Training...")
+        n_playout = 25
+        mcts_side = BLACK
         for i in range(self.max_epoch):
             self.n_epoch += 1
-            print("New epoch:", self.n_epoch)
-            loss, entropy = self.train()
-            # check the performance of the current model,
-            # and save the model params
-            if (i+1) % self.check_freq == 0:
-                print("Start evaluation.")
-                current_mcts_player = mcts_alphazero(self.model.policy_value_fn, 
-                    c_puct=self.c_puct, n_playout=self.n_playout, selfplay=False)
-                pure_mcts_player = MCTS_pure(c_puct=self.c_puct, n_playout=self.n_playout_pure_mcts)
-                win_ratio = self.game_collector.parallel_eval(current_mcts_player, 
-                    self.model.policy_value_net, pure_mcts_player, self.n_cores, 
-                    self.n_eval_games, self.temp, self.game_args)
-                self.model.save(self.dir_save, self.n_epoch)
-                print("win ratio:", win_ratio, "#games:", 
-                    self.n_eval_games, "#pure mcts playout", self.n_playout_pure_mcts)
-                if win_ratio > self.best_win_ratio:
-                    print("New best model!")
-                    self.best_win_ratio = win_ratio
-                    self.model.save(self.dir_save, self.n_epoch, is_best=True)
-                    if (self.best_win_ratio == 1.0 and self.n_playout_pure_mcts < 10000):
-                        self.n_playout_pure_mcts += 1000
-                        self.best_win_ratio = 0.0
+            self.train()
 
+            if self.n_epoch % self.check_freq == 0:
+                print(f"Saving Checkpoint at epoch {self.n_epoch}")
+                self.model.save(self.dir_save, self.n_epoch)
+
+                # evaluation against mcts
+                mcts_player = MCTS_pure(c_puct=5, n_playout=n_playout)
+                n_playout = self.evaluate(n_playout, mcts_side, mcts_player, evaluation_games=20, model_name='mcts')
+
+    def evaluate(self, n_playout, opponent_side, opponent_player, evaluation_games=10, model_name='ppo'):
+        agent = PPOAgent(self.model.policy_net, device=self.model.device)
+        wins, losses, draws = 0, 0, 0
+
+        for _ in range(evaluation_games):
+            game = Game(**self.game_args)
+            while True:
+                if game.current_player == opponent_side:
+                    move, _ = opponent_player.get_action(game)
+                else:
+                    move, _, _, _ = agent.get_action(game, deterministic=True)
+
+                game_status = game.do_move(move)
+                if game_is_over(game_status):
+                    break
+
+            winner = game_winner(game_status)
+
+            if winner == opponent_side:
+                losses += 1
+            elif winner == 0:
+                draws += 1
+            else:
+                wins += 1
+
+        win_ratio = wins / evaluation_games
+        loss_ratio = losses / evaluation_games
+        draw_ratio = draws / evaluation_games
+
+        print(
+            f'<{model_name}> Evaluation against MCTS ({n_playout} playouts) - Win: {win_ratio:.2f} | Draw: {draw_ratio:.2f} | Loss: {loss_ratio:.2f}')
+
+        self.writer.add_scalar("Eval_vs_MCTS/Win_Rate", win_ratio, self.n_epoch)
+        self.writer.add_scalar("Eval_vs_MCTS/Draw_Rate", draw_ratio, self.n_epoch)
+        self.writer.add_scalar("Eval_vs_MCTS/Loss_Rate", loss_ratio, self.n_epoch)
+        self.writer.add_scalar("Eval_vs_MCTS/MCTS_Playouts_Difficulty", n_playout, self.n_epoch)
+
+        if win_ratio > 0.75:
+            n_playout *= 2
+
+        return min(n_playout, 10000)
