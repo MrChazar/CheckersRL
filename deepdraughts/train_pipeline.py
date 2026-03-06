@@ -58,7 +58,7 @@ class TrainPipeline():
             n_cores=self.n_cores,
             shared_model=self.model.policy_net,
             epsilon=self.current_eps,
-            batch_size=self.n_cores * 2, # size of batch
+            batch_size=self.batch_size, #self.n_cores * 2, # size of batch
             game_args=self.game_args,
             training_side=training_side,
             n_steps=self.n_steps,
