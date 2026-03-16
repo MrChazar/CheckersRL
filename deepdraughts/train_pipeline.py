@@ -30,7 +30,9 @@ class TrainPipeline():
         self.eps_start = config.getfloat("training_args", "epsilon_start")
         self.eps_end = config.getfloat("training_args", "epsilon_end")
         self.eps_decay = config.getfloat("training_args", "epsilon_decay")
-        self.target_update_freq = config.getint("training_args", "target_update_freq")
+        self.beta_start = config.getfloat("training_args", "beta_start", fallback=0.4)
+        self.beta_frames = config.getfloat("training_args", "beta_frames", fallback=200_000)
+        # self.target_update_freq = config.getint("training_args", "target_update_freq")
         self.n_steps = config.getint("model_args", "n_steps")
 
         self.game_args = game_args
@@ -38,31 +40,37 @@ class TrainPipeline():
         self.dir_save = dir_save
         self.name = model.name
 
-        self.replay_buffer = ReplayBuffer(self.buffer_size)
+        self.replay_buffer = ReplayBuffer(self.buffer_size, device=self.model.device)
         self.writer = SummaryWriter(self.dir_save + self.name + "_" + datetime.datetime.now().strftime("%Y%m%d_%H%M%S"))
 
         self.n_epoch = 0
         self.global_step = 0
         self.current_eps = 1
+        self.current_beta = self.get_beta()
 
     def get_epsilon(self):
         """Exponential decay for epsilon"""
         return self.eps_end + (self.eps_start - self.eps_end) * \
             np.exp(-1. * self.global_step / self.eps_decay)
 
+    def get_beta(self):
+        return min(1.0, self.beta_start + self.global_step * (1.0 - self.beta_start) / self.beta_frames)
+
     def train(self, training_side=WHITE):
         # Collect Data (Self-Play)
         # collect 'n_cores' games per epoch loop to add variety
         self.current_eps = self.get_epsilon()
+        self.current_beta = self.get_beta()
         new_transitions, _ = GameCollector.parallel_collect_selfplay(
             n_cores=self.n_cores,
             shared_model=self.model.policy_net,
             epsilon=self.current_eps,
-            batch_size=self.batch_size, #self.n_cores * 2, # size of batch
+            batch_size=self.n_cores * 4,  # size of batch
             game_args=self.game_args,
             training_side=training_side,
             n_steps=self.n_steps,
-            gamma=self.gamma
+            gamma=self.gamma,
+            device=self.model.device,
         )
 
         self.model.policy_net.to(device=self.model.device)
@@ -106,17 +114,23 @@ class TrainPipeline():
             q_mean += q_vals.mean().item()
         q_mean /= self.epochs
         avg_loss = total_loss / self.epochs
-        print(f"Epoch {self.n_epoch} | Buffer: {len(self.replay_buffer)} | Epsilon: {self.current_eps:.4f} | Avg loss: {avg_loss:.4f} | Q max: {q_max:.2f} | Q mean: {q_mean:.2f}")
+        print(
+            f"Epoch {self.n_epoch} | Buffer: {len(self.replay_buffer.pos)} | Epsilon: {self.current_eps:.4f} | Avg loss: {(avg_loss * 10):.4f} | Q max: {q_max:.2f} | Q mean: {q_mean:.2f} | Beta: {self.current_beta:.4f}")
         self.writer.add_scalar("loss", avg_loss, self.n_epoch)
         self.writer.add_scalar("epsilon", self.current_eps, self.n_epoch)
+        self.writer.add_scalar("beta", self.current_beta, self.n_epoch)
 
         return avg_loss
 
     def run(self):
         """Main Loop"""
         print("Starting DQN Training...")
-        n_playout = 25
+        n_playout = 100
         mcts_side = BLACK
+
+        # mcts_player = MCTS_pure(c_puct=5, n_playout=n_playout)
+        # n_playout = self.evaluate(n_playout, mcts_side, mcts_player, 100, model_name='mcts')
+
         for i in range(self.max_epoch):
             self.n_epoch += 1
             self.global_step += 1
@@ -125,9 +139,10 @@ class TrainPipeline():
 
             # Sync Target Network
             tau = 0.006  # can adjust 0.001–0.01
-            for target_param, online_param in zip(self.model.target_net.parameters(), self.model.policy_net.parameters()):
+            for target_param, online_param in zip(self.model.target_net.parameters(),
+                                                  self.model.policy_net.parameters()):
                 target_param.data.copy_(tau * online_param.data + (1.0 - tau) * target_param.data)
-            #if self.n_epoch % self.target_update_freq == 0:
+            # if self.n_epoch % self.target_update_freq == 0:
             #    self.model.sync_target_network()
 
             # Checkpoint & Evaluate
@@ -137,7 +152,6 @@ class TrainPipeline():
 
                 mcts_player = MCTS_pure(c_puct=5, n_playout=n_playout)
                 n_playout = self.evaluate(n_playout, mcts_side, mcts_player, 100, model_name='mcts')
-
 
     def evaluate(self, n_playout, opponent_side, opponent_player, evaluation_games=10, model_name='dqn'):
         agent = DQNAgent(self.model.policy_net, epsilon=0.0, device=self.model.device)
@@ -181,7 +195,8 @@ class TrainPipeline():
         self.writer.add_scalar(f"{model_name} win_ratio", win_ratio, self.n_epoch)
         self.writer.add_scalar(f"{model_name} loss_ratio", loss_ratio, self.n_epoch)
         self.writer.add_scalar(f"{model_name} mcts_n_playout", n_playout, self.n_epoch)
-        print(f'<{model_name}> Evaluation win ratio: {win_ratio:.2f} | Evaluation loss ratio: {loss_ratio:.2f} | Avg reward: {avg_reward:.4f} | mcts_n_playout: {n_playout}')
+        print(
+            f'<{model_name}> Evaluation win ratio: {win_ratio:.2f} | Evaluation loss ratio: {loss_ratio:.2f} | Avg reward: {avg_reward:.4f} | mcts_n_playout: {n_playout}')
         if win_ratio > 0.75:
             n_playout *= 2
         return min(n_playout, 10000)

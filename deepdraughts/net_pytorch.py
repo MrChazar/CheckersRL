@@ -191,7 +191,6 @@ class Model():
         # Apply importance sampling weights
         loss = (weights * loss_per_sample).mean()
 
-        self.optimizer.zero_grad()
         loss.backward()
         # Gradient clipping to prevent exploding gradients
         for param in self.policy_net.parameters():

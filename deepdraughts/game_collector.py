@@ -1,7 +1,8 @@
 from deepdraughts.env.py_env.env_utils import enable_endgame_database, get_endgame_database, set_endgame_database
 from .env import Game, game_status_to_str, game_is_drawn, game_is_over, game_winner
-from .dqn import DQNAgent  # Import new agent
+from .dqn import DQNAgent
 import numpy as np
+import torch
 import pickle
 import time
 import copy
@@ -14,7 +15,6 @@ PIECE_TAKEN = .03
 #KING_TAKEN = 8.
 
 class GameCollector():
-
     @classmethod
     def get_number_of_taken_pieces(cls, game, training_side):
         pieces = game.current_board.get_pieces()
@@ -24,7 +24,7 @@ class GameCollector():
         return pieces_taken
 
     @classmethod
-    def self_play(cls, shared_net, epsilon, game_args=dict(), shared_database=None, training_side=WHITE, n_steps=1, gamma=0.99):
+    def self_play(cls, shared_net, epsilon, game_args=dict(), shared_database=None, training_side=WHITE, n_steps=1, gamma=0.99, device='cpu'):
         """
         Play one game using DQN Agent (Self-play).
         Returns list of transitions: [(s, a, r, s', done), ...]
@@ -34,7 +34,7 @@ class GameCollector():
             enable_endgame_database(shared_database)
 
         # Initialize Agent with shared network
-        agent = DQNAgent(shared_net, epsilon=epsilon, device='cpu')  # GPU inside process might be tricky so its better to use cpu
+        agent = DQNAgent(shared_net, epsilon=epsilon, device=device)  # GPU inside process might be tricky so its better to use cpu
 
         game = Game(**game_args)
 
@@ -112,7 +112,7 @@ class GameCollector():
 
     @classmethod
     def count_pieces(cls, board_tensor, side):
-        # count opponent pieces
+        # Count opponent pieces
         if side == WHITE:
             return np.sum(board_tensor[0]) + np.sum(board_tensor[1])
         else:  # BLACK
@@ -120,7 +120,7 @@ class GameCollector():
 
     @classmethod
     def parallel_collect_selfplay(cls, n_cores, shared_model, epsilon, batch_size,
-                                  game_args=dict(), filepath=None, training_side=WHITE, n_steps=1, gamma=0.99):
+                                  game_args=dict(), filepath=None, training_side=WHITE, n_steps=1, gamma=0.99, device='cpu'):
         """
         Runs multiple self-play games in parallel to fill the buffer.
         """
@@ -131,7 +131,8 @@ class GameCollector():
             from multiprocessing import Pool
 
         # Important: There was a mismatch between model in gpu and cpu this line helps
-        shared_model.cpu()
+        shared_model.to(device)
+        #shared_model.share_memory()
 
         with Pool(n_cores) as pool:
             results = []
@@ -139,7 +140,7 @@ class GameCollector():
             n_games_to_play = batch_size  # batch_size is a of num_games !
 
             for _ in range(n_games_to_play):
-                res = pool.apply_async(cls.self_play, (shared_model, epsilon, game_args, shared_database, training_side, n_steps, gamma))
+                res = pool.apply_async(cls.self_play, (shared_model, epsilon, game_args, shared_database, training_side, n_steps, gamma, device) )
                 results.append(res)
 
             pool.close()
@@ -148,7 +149,8 @@ class GameCollector():
             all_transitions = []
             winners = []
             for res in results:
-                transitions, winner = res.get()
+                res_get = res.get()
+                transitions, winner = res_get
                 all_transitions.extend(transitions)
                 winners.append(winner)
 
@@ -164,8 +166,8 @@ class GameCollector():
         if shared_database is not None:
             enable_endgame_database(shared_database)
 
-        agent_current = DQNAgent(current_net, epsilon=0.0, use_gpu=False)  # epsilon 0 for better eval
-        agent_eval = DQNAgent(eval_net, epsilon=0.0, use_gpu=False) if eval_net else None
+        agent_current = DQNAgent(current_net, epsilon=0.0, device='cpu')  # epsilon 0 for better eval
+        agent_eval = DQNAgent(eval_net, epsilon=0.0, device='cpu') if eval_net else None
 
         game = Game(**game_args)
         white_player = agent_current if i % 2 == 0 else agent_eval
@@ -198,7 +200,7 @@ class GameCollector():
         except ImportError:
             from multiprocessing import Pool
 
-        current_model.cpu()
+        #current_model.cpu()
         if eval_model: eval_model.cpu()
 
         with Pool(n_cores) as pool:

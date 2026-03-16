@@ -28,7 +28,7 @@ def run_train_pipline(config):
         model = Model(env_args, name=name, device=device, l2_const=l2_const)
     else:
         print(f"Loaded model from {checkpoint} | device: {device}")
-        model = Model.load(checkpoint)
+        model = Model.load(checkpoint, device=device)
 
     training_pipeline = TrainPipeline(model, save_dir, config)
     training_pipeline.run()
