@@ -50,7 +50,7 @@ class TrainPipeline():
 
         self.n_epoch = 0
         self.global_step = 0
-        self.current_eps = 1
+        self.current_eps = self.get_epsilon()
         self.current_beta = self.get_beta()
 
         # Load starting transitions
@@ -75,7 +75,7 @@ class TrainPipeline():
             n_cores=self.n_cores,
             shared_model=self.model.policy_net,
             epsilon=self.current_eps,
-            batch_size=n_games,  # size of batch
+            batch_size = n_games,  # size of batch
             game_args=self.game_args,
             training_side=self.training_side,
             n_steps=self.n_steps,

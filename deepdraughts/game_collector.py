@@ -135,24 +135,24 @@ class GameCollector():
         shared_model.share_memory()
 
         with Pool(n_cores) as pool:
-            results = []
+            game_args_list = [(shared_model, epsilon, game_args, shared_database, training_side, n_steps, gamma,
+                               device)] * batch_size
+            results = pool.starmap(cls.self_play, game_args_list)
+
             # We run n_cores * k games.
-            n_games_to_play = batch_size  # batch_size is a of num_games !
+            # n_games_to_play = batch_size  # batch_size is a of num_games !
+            # for _ in range(n_games_to_play):
+            #     res = pool.apply_async(cls.self_play, (shared_model, epsilon, game_args, shared_database, training_side, n_steps, gamma, device) )
+            #     results.append(res)
+            # pool.close()
+            # pool.join()
 
-            for _ in range(n_games_to_play):
-                res = pool.apply_async(cls.self_play, (shared_model, epsilon, game_args, shared_database, training_side, n_steps, gamma, device) )
-                results.append(res)
-
-            pool.close()
-            pool.join()
-
-            all_transitions = []
-            winners = []
-            for i, res in enumerate(results):
-                res_get = res.get()
-                transitions, winner = res_get
-                all_transitions.extend(transitions)
-                winners.append(winner)
+        all_transitions = []
+        winners = []
+        for res in results:
+            transitions, winner = res
+            all_transitions.extend(transitions)
+            winners.append(winner)
 
         if filepath:
             cls.dump_data(all_transitions, filepath)
