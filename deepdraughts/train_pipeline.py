@@ -11,6 +11,10 @@ from .game_collector import GameCollector, GAME_WIN, GAME_TIE, GAME_LOSS, PIECE_
 from .env import Game
 from deepdraughts.mcts_pure import MCTSPlayer as MCTS_pure
 from .env import *
+import multiprocessing
+import time
+
+from .net_pytorch import DQNNet
 
 
 class TrainPipeline():
@@ -91,6 +95,7 @@ class TrainPipeline():
         # collect 'n_cores' games per epoch loop to add variety
         self.current_eps = self.get_epsilon()
         self.current_beta = self.get_beta()
+        self.model.policy_net.train()
 
         # self.model.policy_net.to(device=self.model.device)
 
@@ -175,17 +180,11 @@ class TrainPipeline():
                 mcts_player = MCTS_pure(c_puct=5, n_playout=n_playout)
                 n_playout = self.evaluate(n_playout, mcts_side, mcts_player, self.n_eval_games, model_name='mcts')
 
-    def evaluate(self, n_playout, opponent_side, opponent_player, evaluation_games=10, model_name='dqn'):
-        net = self.model.policy_net
-        agent = DQNAgent(net, epsilon=0.0, device=self.model.device)
-        wins = 0
-        draws = 0
-        losses = 0
-        reward = 0
-        for game in range(evaluation_games):
-            print(f'Evaluating game {game}/{evaluation_games}')
-            # evaluation game against MCTS
-            game = Game(**self.game_args)
+    @staticmethod
+    def evaluate_game(agent: DQNAgent, opponent_player, game_args, opponent_side, result_queue):
+        with torch.no_grad():
+            game = Game(**game_args)
+            reward = 0
             while True:
                 if game.current_player == opponent_side:
                     move, _ = opponent_player.get_action(game)
@@ -196,35 +195,67 @@ class TrainPipeline():
 
                 if game_is_over(game_status):
                     break
-            # calculate reward
+
+            # Calculate reward
             pieces = game.current_board.get_pieces()
             mcts_pieces = len([x for x in pieces if x.player == opponent_side])
             dqn_pieces = len(pieces) - mcts_pieces
             reward += (12 - mcts_pieces) * PIECE_TAKEN
             reward -= (12 - dqn_pieces) * PIECE_TAKEN
+
             winner = game_winner(game_status)
             if winner == 0:
-                draws += 1
                 reward += GAME_TIE
             elif winner == opponent_side:
-                losses += 1
                 reward += GAME_LOSS
             else:
-                wins += 1
                 reward += GAME_WIN
+
+            result_queue.put((reward, winner))
+
+    def evaluate(self, n_playout, opponent_side, opponent_player, evaluation_games=10, model_name='dqn'):
+        start_time = time.perf_counter()
+        net = self.model.policy_net
+        # Copy model to cpu
+        # cpu_net = DQNNet(net.nsize, net.n_states, net.n_actions)
+        # state_dict = {k: v.to('cpu') for k, v in net.state_dict().items()}
+        # state_dict = OrderedDict(state_dict)
+        # cpu_net.load_state_dict(state_dict)
+
+        net.eval()
+        agent = DQNAgent(net, epsilon=0.0, device=self.model.device)
+
+        wins, draws, losses, reward = 0, 0, 0, 0
+
+        with multiprocessing.Manager() as manager:
+            result_queue = manager.Queue()
+
+            with multiprocessing.Pool() as pool:
+                args = [(agent, opponent_player, self.game_args, opponent_side, result_queue) for _ in
+                        range(evaluation_games)]
+                pool.starmap(self.evaluate_game, args)
+
+            while not result_queue.empty():
+                game_reward, winner = result_queue.get()
+                reward += game_reward
+                if winner == 0:
+                    draws += 1
+                elif winner == opponent_side:
+                    losses += 1
+                else:
+                    wins += 1
+
         win_ratio = wins / evaluation_games
         loss_ratio = losses / evaluation_games
         avg_reward = reward / evaluation_games
-
-        # reset device
-        net.to(device=self.model.device)
 
         self.writer.add_scalar(f"{model_name} avg_reward", avg_reward, self.n_epoch)
         self.writer.add_scalar(f"{model_name} win_ratio", win_ratio, self.n_epoch)
         self.writer.add_scalar(f"{model_name} loss_ratio", loss_ratio, self.n_epoch)
         self.writer.add_scalar(f"{model_name} mcts_n_playout", n_playout, self.n_epoch)
+        end_time = time.perf_counter()
         print(
-            f'<{model_name}> Evaluation win ratio: {win_ratio:.2f} | Evaluation loss ratio: {loss_ratio:.2f} | Avg reward: {avg_reward:.4f} | mcts_n_playout: {n_playout}')
+            f'<{model_name}> | Time: {(end_time-start_time):.2f} | Win ratio: {win_ratio:.2f} | Loss ratio: {loss_ratio:.2f} | Avg reward: {avg_reward:.4f} | mcts_n_playout: {n_playout}')
         if win_ratio > 0.75:
             n_playout *= 2
         return min(n_playout, 10000)

@@ -29,6 +29,7 @@ class DQNNet(nn.Module):
     def __init__(self, nsize, n_states, n_actions):
         super(DQNNet, self).__init__()
 
+        self.nsize = nsize
         self.board_width = nsize
         self.board_height = nsize
         self.n_states = n_states
