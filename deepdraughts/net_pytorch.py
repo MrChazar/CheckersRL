@@ -193,8 +193,9 @@ class Model():
 
         loss.backward()
         # Gradient clipping to prevent exploding gradients
-        for param in self.policy_net.parameters():
-            param.grad.data.clamp_(-1, 1)
+        # for param in self.policy_net.parameters():
+        #     param.grad.data.clamp_(-1, 1)
+        torch.nn.utils.clip_grad_value_(self.policy_net.parameters(), 1.0)
         #torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), 5.0)
         self.optimizer.step()
 

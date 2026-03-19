@@ -131,8 +131,8 @@ class GameCollector():
             from multiprocessing import Pool
 
         # Important: There was a mismatch between model in gpu and cpu this line helps
-        shared_model.to(device)
-        #shared_model.share_memory()
+        #shared_model.to(device)
+        shared_model.share_memory()
 
         with Pool(n_cores) as pool:
             results = []
@@ -148,7 +148,7 @@ class GameCollector():
 
             all_transitions = []
             winners = []
-            for res in results:
+            for i, res in enumerate(results):
                 res_get = res.get()
                 transitions, winner = res_get
                 all_transitions.extend(transitions)

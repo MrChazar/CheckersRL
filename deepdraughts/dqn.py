@@ -16,20 +16,25 @@ class ReplayBuffer:
         self.device = device
 
         self.buffer = np.empty(capacity, dtype=object)
-        self.priorities = np.empty(capacity, dtype=np.float32)
+        self.priorities = np.zeros(capacity, dtype=np.float32)
         self.pos = 0
 
-    def push(self, *args):
-        max_priority = max(self.priorities, default=1.0)
+        self.max_priority = 1
 
+    def push_multiple(self, transitions):
+        transitions = transitions[:self.capacity] # clip
+        for transition in transitions:
+            self.push(*transition)
+
+    def push(self, *args):
         if self.pos < self.capacity:
             self.buffer[self.pos] = Transition(*args)
-            self.priorities[self.pos] = max_priority
+            self.priorities[self.pos] = self.max_priority
             self.pos += 1
         else:
             min_priority_idx = self.priorities.argmin().item()
             self.buffer[min_priority_idx] = Transition(*args)
-            self.priorities[min_priority_idx] = max_priority
+            self.priorities[min_priority_idx] = self.max_priority
 
     def sample(self, batch_size, beta=0.4):
         if len(self.buffer) == 0:
@@ -60,6 +65,7 @@ class ReplayBuffer:
             td_errors = td_errors.squeeze()
             # print(self.priorities.shape, indices.shape, td_errors.shape)
             self.priorities[indices] = td_errors + 1e-6
+            self.max_priority = self.priorities.max()
 
     def __len__(self):
         return len(self.buffer)
