@@ -88,6 +88,7 @@ class DQNAgent:
         self.epsilon = epsilon
         self.device = device
         self.side = side
+        self.net.to(device=device)
 
     def get_action(self, game, side=None):
         """

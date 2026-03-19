@@ -176,12 +176,14 @@ class TrainPipeline():
                 n_playout = self.evaluate(n_playout, mcts_side, mcts_player, self.n_eval_games, model_name='mcts')
 
     def evaluate(self, n_playout, opponent_side, opponent_player, evaluation_games=10, model_name='dqn'):
-        agent = DQNAgent(self.model.policy_net, epsilon=0.0, device=self.model.device)
+        net = self.model.policy_net
+        agent = DQNAgent(net, epsilon=0.0, device=self.model.device)
         wins = 0
         draws = 0
         losses = 0
         reward = 0
-        for _ in range(evaluation_games):
+        for game in range(evaluation_games):
+            print(f'Evaluating game {game}/{evaluation_games}')
             # evaluation game against MCTS
             game = Game(**self.game_args)
             while True:
@@ -213,6 +215,10 @@ class TrainPipeline():
         win_ratio = wins / evaluation_games
         loss_ratio = losses / evaluation_games
         avg_reward = reward / evaluation_games
+
+        # reset device
+        net.to(device=self.model.device)
+
         self.writer.add_scalar(f"{model_name} avg_reward", avg_reward, self.n_epoch)
         self.writer.add_scalar(f"{model_name} win_ratio", win_ratio, self.n_epoch)
         self.writer.add_scalar(f"{model_name} loss_ratio", loss_ratio, self.n_epoch)

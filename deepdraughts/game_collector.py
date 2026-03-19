@@ -160,14 +160,14 @@ class GameCollector():
         return all_transitions, winners
 
     @classmethod
-    def eval(cls, current_net, eval_net, i, game_args=dict(), shared_database=None):
+    def eval(cls, current_net, eval_net, i, game_args=dict(), shared_database=None, device='cpu'):
         """Evaluation: DQN vs DQN """
         np.random.seed()
         if shared_database is not None:
             enable_endgame_database(shared_database)
 
-        agent_current = DQNAgent(current_net, epsilon=0.0, device='cpu')  # epsilon 0 for better eval
-        agent_eval = DQNAgent(eval_net, epsilon=0.0, device='cpu') if eval_net else None
+        agent_current = DQNAgent(current_net, epsilon=0.0, device=device)  # epsilon 0 for better eval
+        agent_eval = DQNAgent(eval_net, epsilon=0.0, device=device) if eval_net else None
 
         game = Game(**game_args)
         white_player = agent_current if i % 2 == 0 else agent_eval
