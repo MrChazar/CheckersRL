@@ -12,6 +12,7 @@ from .env import Game
 from deepdraughts.mcts_pure import MCTSPlayer as MCTS_pure
 from .env import *
 import multiprocessing
+from collections import OrderedDict
 import time
 
 from .net_pytorch import DQNNet
@@ -213,17 +214,19 @@ class TrainPipeline():
 
             result_queue.put((reward, winner))
 
-    def evaluate(self, n_playout, opponent_side, opponent_player, evaluation_games=10, model_name='dqn'):
+    def evaluate(self, n_playout, opponent_side, opponent_player, evaluation_games=10, model_name='dqn', use_cpu=True):
         start_time = time.perf_counter()
         net = self.model.policy_net
-        # Copy model to cpu
-        # cpu_net = DQNNet(net.nsize, net.n_states, net.n_actions)
-        # state_dict = {k: v.to('cpu') for k, v in net.state_dict().items()}
-        # state_dict = OrderedDict(state_dict)
-        # cpu_net.load_state_dict(state_dict)
+        use_net = net
+        if use_cpu:
+            # Copy model to cpu
+            use_net = DQNNet(net.nsize, net.n_states, net.n_actions)
+            state_dict = {k: v.to('cpu') for k, v in net.state_dict().items()}
+            state_dict = OrderedDict(state_dict)
+            use_net.load_state_dict(state_dict)
 
-        net.eval()
-        agent = DQNAgent(net, epsilon=0.0, device=self.model.device)
+        use_net.eval()
+        agent = DQNAgent(use_net, epsilon=0.0, device='cpu' if use_cpu else self.model.device)
 
         wins, draws, losses, reward = 0, 0, 0, 0
 
