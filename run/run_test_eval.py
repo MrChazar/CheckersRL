@@ -21,6 +21,9 @@ def evaluate_mcts(config):
         os.makedirs(save_dir)
 
     checkpoint = config.get("model_args", "checkpoint", fallback=None)
+    if checkpoint is None:
+        print("!!! No checkpoint provided in config, exiting")
+        return
     test_games = config.get("eval", "n_test_games", fallback=200)
     test_playout = config.get("eval", "n_test_playout", fallback=100)
     device = 'cpu'
