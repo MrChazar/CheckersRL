@@ -42,3 +42,11 @@ Ewaluacja uruchamia się co określoną liczbę epok przeciwko MCTS z ustaloną 
 - game_collector.py - odpowiada za odpalanie gierek, pobieranie stanów
 - mcts_alphazero i net_pytorch - implementacja uczenia w stylu alphazero (fajne)
 - generator.py - plik pozwalający na odpalanie wielu rozgrywek na raz
+
+# Todo
+- Lepszy bot xD. Pomysły:
+  - Zrobić lepsze zapisywanie stanu, aby bez problemu kontynuować uczenie.
+  - Trenować w 2 fazach, najpierw z szybkim zejściem epsilona aż zacznie coś grać, potem fine tuning z małym LR i tau
+- Super byłaby jakaś wizualizacja tego jak myśli model podczas ruchu. + eval bar
+- Można rozbudować GUI o wybór bota z którym gramy (chociażby MCTS/DQN).
+- Najlepiej jakby się dało puścić przeciwko sobie boty na GUI, z opcją przewijania ruchów.
