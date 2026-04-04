@@ -1,4 +1,5 @@
 import configparser
+import pickle
 import os
 from deepdraughts.env import *
 from deepdraughts.net_pytorch import Model
@@ -21,16 +22,32 @@ def run_train_pipline(config):
     name = config.get("model_args", "name", fallback="DQN")
     device = config.get("model_args", "device", fallback="cuda")
     l2_const = config.getfloat("model_args", "l2_const", fallback=0)
+    train_state = None
 
     if not checkpoint:
         env_args = get_env_args()
         print(f"Starting new model {name} | device: {device}")
         model = Model(env_args, name=name, device=device, l2_const=l2_const)
     else:
-        print(f"Loaded model from {checkpoint} | device: {device}")
-        model = Model.load(checkpoint, device=device)
+        state_path = checkpoint + "_state.pkl"
+        model_path = checkpoint + ".pth.tar"
 
-    training_pipeline = TrainPipeline(model, save_dir, config)
+        if os.path.exists(model_path):
+            print(f"Loaded model from {checkpoint} | device: {device}")
+            model = Model.load(checkpoint + '.pth.tar', device=device)
+        else:
+            print(f"No model found at {model_path}, exiting")
+            return
+
+        if os.path.exists(state_path):
+            print(f"Loaded training state from {state_path}")
+            with open(state_path, "rb") as f:
+                train_state = pickle.load(f)
+        else:
+            print(f"No training state found at {state_path}, starting with default training state")
+
+
+    training_pipeline = TrainPipeline(model, save_dir, config, train_state=train_state)
     training_pipeline.run()
 
 

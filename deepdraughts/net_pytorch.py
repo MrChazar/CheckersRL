@@ -202,10 +202,7 @@ class Model():
 
         return loss.item(), next_q_online, td_errors
 
-    def save(self, checkpoint_dir, epoch, is_best=False):
-        now_time = datetime.datetime.now().strftime("%Y%m%d_%H%M")
-        name = self.name + "_best" if is_best else self.name
-        savepath = os.path.join(checkpoint_dir, '{}_epoch{}_{}.pth.tar'.format(name, epoch, now_time))
+    def save(self, savepath, epoch, is_best=False):
 
         torch.save({
             'nsize': self.nsize,
@@ -216,6 +213,7 @@ class Model():
             'device': self.device,
             'l2_const': self.l2_const,
             'model': self.policy_net.state_dict(),
+            'target_model': self.target_net.state_dict(),
             'optimizer': self.optimizer.state_dict(),
         }, savepath)
 
@@ -226,6 +224,9 @@ class Model():
         env_args = (model_params['nsize'], model_params['device'], model_params['n_states'], model_params['n_actions'])
         model = Model(env_args, model_params['name'], device, model_params['l2_const'])
         model.policy_net.load_state_dict(model_params['model'])
-        model.target_net.load_state_dict(model_params['model'])  # Sync target on load
+        if 'target_model' in model_params:
+            model.target_net.load_state_dict(model_params['target_model'])  # Sync target on load
+        else:
+            model.target_net.load_state_dict(model_params['model'])  # Sync target on load
         model.optimizer.load_state_dict(model_params['optimizer'])
         return model

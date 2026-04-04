@@ -1,15 +1,19 @@
 from __future__ import print_function
+
+import configparser
+
 import numpy as np
-import random
+import pickle
 from tensorboardX import SummaryWriter
 import datetime
 import os
 import copy
 import torch
+
 from .dqn import ReplayBuffer, DQNAgent
 from .game_collector import GameCollector, GAME_WIN, GAME_TIE, GAME_LOSS, PIECE_TAKEN
 from .env import Game
-from deepdraughts.mcts_pure import MCTSPlayer as MCTS_pure
+from .mcts_pure import MCTSPlayer as MCTS_pure
 from .env import *
 import multiprocessing
 from collections import OrderedDict
@@ -19,14 +23,15 @@ from .net_pytorch import DQNNet
 
 
 class TrainPipeline():
-    def __init__(self, model, dir_save, config, game_args=dict()):
+    def __init__(self, model, dir_save, config, train_state=None, game_args=dict()):
+        self.config = config
+
         # Training Args
         self.training_side = WHITE
         self.max_epoch = config.getint("training_args", "max_epoch")
         self.batch_size = config.getint("training_args", "batch_size")  # Used for gradient update batch
         self.n_cores = config.getint("training_args", "n_cores")
         self.epochs = config.getint("training_args", "epochs")  # Gradient steps per epoch
-
 
         # DQN Args
         self.lr = config.getfloat("training_args", "learn_rate")
@@ -58,11 +63,31 @@ class TrainPipeline():
         self.current_eps = self.get_epsilon()
         self.current_beta = self.get_beta()
 
-        # Load starting transitions
-        if self.starting_buffer_games > 0:
+        if train_state is not None:
+            self.load_train_state(train_state)
+        elif self.starting_buffer_games > 0: # Load starting transitions
             transitions = self.get_transitions(self.starting_buffer_games)
             print(f'Collected {self.starting_buffer_games} games, {len(transitions)} transitions, adding to buffer...')
             self.replay_buffer.push_multiple(transitions)
+
+    def load_train_state(self, train_state):
+        self.n_epoch = train_state.get("n_epoch", self.n_epoch)
+        self.global_step = train_state.get("global_step", self.global_step)
+        self.current_eps = train_state.get("current_eps", self.current_eps)
+        self.current_beta = train_state.get("current_beta", self.current_beta)
+        self.training_side = train_state.get("training_side", self.training_side)
+        self.lr = train_state.get("lr", self.lr)
+        self.gamma = train_state.get("gamma", self.gamma)
+        self.tau = train_state.get("tau", self.tau)
+
+        rb_state = train_state.get("replay_buffer")
+        if rb_state is not None:
+            self.replay_buffer.capacity = rb_state.get("capacity", self.replay_buffer.capacity)
+            self.replay_buffer.alpha = rb_state.get("alpha", self.replay_buffer.alpha)
+            self.replay_buffer.pos = rb_state.get("pos", self.replay_buffer.pos)
+            self.replay_buffer.max_priority = rb_state.get("max_priority", self.replay_buffer.max_priority)
+            self.replay_buffer.buffer = rb_state.get("buffer", self.replay_buffer.buffer)
+            self.replay_buffer.priorities = rb_state.get("priorities", self.replay_buffer.priorities)
 
     def get_epsilon(self):
         """Exponential decay for epsilon"""
@@ -176,10 +201,48 @@ class TrainPipeline():
             # Checkpoint & Evaluate
             if self.n_epoch % self.check_freq == 0:
                 print(f"Saving Checkpoint at epoch {self.n_epoch}", end=' - ')
-                self.model.save(self.dir_save, self.n_epoch)
+                self.save_checkpoint()
 
                 mcts_player = MCTS_pure(c_puct=5, n_playout=n_playout)
                 n_playout = self.evaluate(n_playout, mcts_side, mcts_player, self.n_eval_games, model_name='mcts')
+
+    def save_checkpoint(self):
+        now_time = datetime.datetime.now().strftime("%Y%m%d_%H%M")
+        name = self.name
+        savepath = os.path.join(self.dir_save, '{}_epoch{}_{}'.format(name, self.n_epoch, now_time))
+
+        self.model.save(savepath+'.pth.tar', self.n_epoch)
+        config_snapshot = {section: dict(self.config[section]) for section in self.config.sections()}
+
+        train_state = {
+            "n_epoch": self.n_epoch,
+            "global_step": self.global_step,
+            "current_eps": self.current_eps,
+            "current_beta": self.current_beta,
+            "eps_start": self.eps_start,
+            "eps_end": self.eps_end,
+            "eps_decay": self.eps_decay,
+            "beta_start": self.beta_start,
+            "beta_frames": self.beta_frames,
+            "training_side": self.training_side,
+            "gamma": self.gamma,
+            "tau": self.tau,
+            "lr": self.lr,
+            "batch_size": self.batch_size,
+            "epochs": self.epochs,
+            "buffer_size": self.buffer_size,
+            "replay_buffer": {
+                "capacity": self.replay_buffer.capacity,
+                "alpha": self.replay_buffer.alpha,
+                "pos": self.replay_buffer.pos,
+                "max_priority": self.replay_buffer.max_priority,
+                "buffer": self.replay_buffer.buffer,
+                "priorities": self.replay_buffer.priorities,
+            },
+            "config": config_snapshot,
+        }
+        with open(savepath+'_state.pkl', "wb") as f:
+            pickle.dump(train_state, f, protocol=pickle.HIGHEST_PROTOCOL)
 
     @staticmethod
     def evaluate_game(agent: DQNAgent, opponent_player, game_args, opponent_side, result_queue):
