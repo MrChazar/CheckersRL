@@ -28,6 +28,9 @@ Dodałem funkcję do ewaluacji modelu (ewaluacja tym mocnym modelem MCTS aczkolw
 ### Ewaluacja
 Ewaluacja uruchamia się co określoną liczbę epok przeciwko MCTS z ustaloną głębokością, mierzy *win ratio* i *average Q*. Plik run_test_eval.py uruchamia samą ewaluację.
 
+### Checkpointy
+Ulepszyłem zapisywanie checkpointów, aby dało się wznowić trening, a ten potrafi trwać bardzo długo.
+
 # Jak używać
 ### Uruchamianie:
 - Granie z botem na GUI - `python run.py`
