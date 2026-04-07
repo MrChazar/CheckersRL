@@ -48,6 +48,7 @@ class TrainPipeline():
 
         # Evaluation Args
         self.check_freq = config.getint("evaluation", "eval_freq", fallback=100)
+        self.save_freq = config.getint("evaluation", "checkpoint_freq", fallback=200)
         self.n_eval_games = config.getint("evaluation", "n_eval_games", fallback=100)
 
         self.game_args = game_args
@@ -200,11 +201,12 @@ class TrainPipeline():
 
             # Checkpoint & Evaluate
             if self.n_epoch % self.check_freq == 0:
-                print(f"Saving Checkpoint at epoch {self.n_epoch}", end=' - ')
-                self.save_checkpoint()
-
+                print(f"Evaluating with MCTS {n_playout} playouts")
                 mcts_player = MCTS_pure(c_puct=5, n_playout=n_playout)
                 n_playout = self.evaluate(n_playout, mcts_side, mcts_player, self.n_eval_games, model_name='mcts')
+            if self.n_epoch % self.save_freq == 0:
+                print(f"Saving Checkpoint at epoch {self.n_epoch}", end=' - ')
+                self.save_checkpoint()
 
     def save_checkpoint(self):
         now_time = datetime.datetime.now().strftime("%Y%m%d_%H%M")
