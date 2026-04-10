@@ -33,7 +33,7 @@ def run_human_play(config):
     elif play_with == "dqn":
         checkpoint = config.get("model_args", "checkpoint")
         device = config.get("model_args", "device")
-        play_with_DQN(play_using_white, checkpoint, device)
+        play_with_DQN(play_using_white, f"{checkpoint}.pth.tar", device)
 
     else:
         n_playout = config.getint("playing_args", "n_playout")
@@ -58,7 +58,7 @@ def play_with_DQN(play_using_white=True, checkpoint=None, device='cpu'):
         #    print(f"Critical error during import: {e}")
         #    return
     else:
-        print("Initialization of random net")
+        print("Checkpoint not found! Initialization of random net")
         env_args = get_env_args()
         # We create new model
         model_container = Model(env_args, device=device)

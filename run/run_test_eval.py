@@ -28,8 +28,13 @@ def evaluate_mcts(config):
     test_playout = config.get("eval", "n_test_playout", fallback=100)
     device = 'cpu'
 
-    print(f"Loaded model from {checkpoint} | device: {device}")
-    model = Model.load(checkpoint, device=device)
+    model_path = checkpoint + ".pth.tar"
+    if os.path.exists(model_path):
+        print(f"Loaded model from {checkpoint} | device: {device}")
+        model = Model.load(checkpoint + '.pth.tar', device=device)
+    else:
+        print(f"No model found at {model_path}, exiting")
+        return
 
     training_pipeline = TrainPipeline(model, save_dir, config)
 
