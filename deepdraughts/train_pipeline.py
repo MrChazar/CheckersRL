@@ -177,7 +177,7 @@ class TrainPipeline:
             "q_mean": q_mean,
         },
         global_step=self.global_step,
-        run_name=self.name)
+        name=self.name)
 
         # self.writer.add_scalar("loss", avg_loss, self.n_epoch)
         # self.writer.add_scalar("epsilon", self.current_eps, self.n_epoch)
