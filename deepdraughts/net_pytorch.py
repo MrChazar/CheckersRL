@@ -103,11 +103,164 @@ class DQNNet(nn.Module):
 
         return q_values
 
+class RecursiveDQNNet(nn.Module):
+    """
+    Recursive DQN Network:
+    Input:  (Board, State)
+    Output: Q-values for all actions
+
+    Czyli tak samo jak Twój DQNNet:
+        forward(vec_board, vec_state) -> [batch, n_actions]
+
+    Różnica:
+        zamiast jednego przejścia przez końcówkę sieci,
+        model kilka razy aktualizuje latent z.
+    """
+
+    def __init__(self, nsize, n_states, n_actions, recursive_steps=4):
+        super(RecursiveDQNNet, self).__init__()
+
+        self.nsize = nsize
+        self.board_width = nsize
+        self.board_height = nsize
+        self.n_states = n_states
+        self.n_actions = n_actions
+        self.recursive_steps = recursive_steps
+
+        # Feature Extractor (CNN) — tak jak w Twoim DQN
+        self.conv1 = nn.Conv2d(4, 32, kernel_size=3, padding=1)
+        self.bn1 = nn.BatchNorm2d(32)
+
+        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
+        self.bn2 = nn.BatchNorm2d(64)
+
+        self.conv3 = nn.Conv2d(64, 128, kernel_size=3, padding=1)
+        self.bn3 = nn.BatchNorm2d(128)
+
+        # State processing — tak jak w Twoim DQN
+        self.st_fc1 = nn.Linear(n_states, 64)
+
+        # Wspólna reprezentacja pozycji
+        self.fc_common = nn.Linear(128 * nsize * nsize + 64, 512)
+
+        # Rekurencyjna poprawa latentu.
+        # base_feat = stała informacja o pozycji
+        # z = zmienny latent "namysłu"
+        self.refiner = nn.GRUCell(
+            input_size=512,
+            hidden_size=512
+        )
+
+        # Dueling DQN heads — jak u Ciebie
+        # self.fc_value = nn.Linear(512, 256)
+        # self.value_head = nn.Linear(256, 1)
+        #
+        # self.fc_adv = nn.Linear(512, 256)
+        # self.adv_head = nn.Linear(256, n_actions)
+
+        # Standard DQN head
+        self.fc_q = nn.Linear(512, 256)
+        self.q_head = nn.Linear(256, n_actions)
+
+        _initialize_weights(self)
+
+    def _encode(self, vec_board, vec_state):
+        """
+        Zamienia planszę i dodatkowy stan na wspólny feature vector.
+        """
+
+        if len(vec_board.shape) == 3:
+            vec_board = torch.unsqueeze(vec_board, 0)
+
+        if len(vec_state.shape) == 1:
+            vec_state = torch.unsqueeze(vec_state, 0)
+
+        # CNN Path
+        x = F.relu(self.bn1(self.conv1(vec_board)))
+        x = F.relu(self.bn2(self.conv2(x)))
+        x = F.relu(self.bn3(self.conv3(x)))
+
+        x = x.view(x.size(0), -1)
+
+        # State Path
+        y = F.relu(self.st_fc1(vec_state))
+
+        # Merge
+        combined = torch.cat((x, y), dim=1)
+
+        # Bazowa reprezentacja pozycji
+        base_feat = F.relu(self.fc_common(combined))
+
+        return base_feat
+
+    def _q_from_latent(self, z):
+        """
+        latent z -> Q-values dla wszystkich akcji
+        """
+
+        # # Value stream
+        # value = F.relu(self.fc_value(z))
+        # value = self.value_head(value)  # [batch, 1]
+        #
+        # # Advantage stream
+        # adv = F.relu(self.fc_adv(z))
+        # adv = self.adv_head(adv)  # [batch, n_actions]
+        #
+        # # Combine streams
+        # q_values = value + (adv - adv.mean(dim=1, keepdim=True))
+
+        q = F.relu(self.fc_q(z))
+        q_values = self.q_head(q)
+
+        return q_values
+
+    def forward(self, vec_board, vec_state, steps=None, return_all_q=False):
+        """
+        Standardowo:
+            q_values = model(vec_board, vec_state)
+
+        Opcjonalnie:
+            q_per_step = model(
+                vec_board,
+                vec_state,
+                return_all_q=True
+            )
+
+        shapes:
+            q_values:   [batch, n_actions]
+            q_per_step: [batch, steps, n_actions]
+        """
+
+        if steps is None:
+            steps = self.recursive_steps
+        steps = int(steps)
+
+        base_feat = self._encode(vec_board, vec_state)
+
+        # Początkowy latent.
+        # To jest pierwsza reprezentacja pozycji po encoderze.
+        z = base_feat
+
+        q_values_per_step = []
+
+        for _ in range(steps):
+            # Rekurencyjne poprawienie latentu.
+            # base_feat jest cały czas tym samym wejściem,
+            # z jest aktualizowanym stanem "namysłu".
+            z = self.refiner(base_feat, z)
+
+            q_values = self._q_from_latent(z)
+            q_values_per_step.append(q_values)
+
+        if return_all_q:
+            return torch.stack(q_values_per_step, dim=1)
+
+        return q_values_per_step[-1]
 
 class Model():
     """DQN Model Handler with Target Network"""
 
-    def __init__(self, env_args, name="dqn_default", device='cpu', l2_const=1e-4):
+    def __init__(self, env_args, name="dqn_default", device='cpu', l2_const=1e-4, recursive_steps=4):
         nsize, _, n_states, n_actions = env_args
         self.nsize = nsize
         self.n_states = n_states
@@ -117,9 +270,9 @@ class Model():
         self.l2_const = l2_const
 
         # Policy Network (Training)
-        self.policy_net = DQNNet(nsize, n_states, n_actions)
+        self.policy_net = RecursiveDQNNet(nsize, n_states, n_actions, recursive_steps= recursive_steps)
         # Target Network (Stable targets)
-        self.target_net = DQNNet(nsize, n_states, n_actions)
+        self.target_net = RecursiveDQNNet(nsize, n_states, n_actions, recursive_steps= recursive_steps)
 
         self.policy_net = self.policy_net.to(device=self.device)
         self.target_net = self.target_net.to(device=self.device)
@@ -230,3 +383,44 @@ class Model():
             model.target_net.load_state_dict(model_params['model'])  # Sync target on load
         model.optimizer.load_state_dict(model_params['optimizer'])
         return model
+
+
+from collections import OrderedDict
+
+
+def copy_net_to_cpu(net):
+    """
+    Tworzy kopię modelu na CPU, zachowując typ modelu.
+    Obsługuje:
+    - DQNNet
+    - RecursiveDQNNet
+    """
+
+    if isinstance(net, DQNNet):
+        use_net = DQNNet(
+            net.nsize,
+            net.n_states,
+            net.n_actions
+        )
+
+    elif isinstance(net, RecursiveDQNNet):
+        use_net = RecursiveDQNNet(
+            net.nsize,
+            net.n_states,
+            net.n_actions,
+            recursive_steps=net.recursive_steps
+        )
+
+    else:
+        raise TypeError(f"Unsupported model type: {type(net).__name__}")
+
+    state_dict = OrderedDict(
+        (k, v.detach().cpu().clone())
+        for k, v in net.state_dict().items()
+    )
+
+    use_net.load_state_dict(state_dict)
+    use_net.to("cpu")
+    use_net.eval()
+
+    return use_net

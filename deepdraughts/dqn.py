@@ -134,3 +134,4 @@ class DQNAgent:
 
     def set_epsilon(self, eps):
         self.epsilon = eps
+

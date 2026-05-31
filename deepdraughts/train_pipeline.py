@@ -19,10 +19,10 @@ import multiprocessing
 from collections import OrderedDict
 import time
 
-from .net_pytorch import DQNNet
+from .net_pytorch import DQNNet, copy_net_to_cpu
 
 
-class TrainPipeline():
+class TrainPipeline:
     def __init__(self, model, dir_save, config, train_state=None, game_args=dict()):
         self.config = config
 
@@ -167,11 +167,23 @@ class TrainPipeline():
         avg_loss = total_loss / self.epochs
         print(
             f"Epoch {self.n_epoch} | Buffer: {self.replay_buffer.pos} | Epsilon: {self.current_eps:.4f} | Avg loss: {(avg_loss * 10):.4f} | Q max: {q_max:.2f} | Q mean: {q_mean:.2f} | Beta: {self.current_beta:.4f}")
-        self.writer.add_scalar("loss", avg_loss, self.n_epoch)
-        self.writer.add_scalar("epsilon", self.current_eps, self.n_epoch)
-        self.writer.add_scalar("beta", self.current_beta, self.n_epoch)
-        self.writer.add_scalar("q_mean", q_mean, self.n_epoch)
-        self.writer.add_scalar("q_max", q_max, self.n_epoch)
+
+        self.writer.add_hparams({
+            "epsilon": self.current_eps,
+            "beta": self.current_beta,
+        }, {
+            "loss": avg_loss,
+            "q_max": q_max,
+            "q_mean": q_mean,
+        },
+        global_step=self.global_step,
+        run_name=self.name)
+
+        # self.writer.add_scalar("loss", avg_loss, self.n_epoch)
+        # self.writer.add_scalar("epsilon", self.current_eps, self.n_epoch)
+        # self.writer.add_scalar("beta", self.current_beta, self.n_epoch)
+        # self.writer.add_scalar("q_mean", q_mean, self.n_epoch)
+        # self.writer.add_scalar("q_max", q_max, self.n_epoch)
 
         return avg_loss
 
@@ -284,11 +296,7 @@ class TrainPipeline():
         net = self.model.policy_net
         use_net = net
         if use_cpu:
-            # Copy model to cpu
-            use_net = DQNNet(net.nsize, net.n_states, net.n_actions)
-            state_dict = {k: v.to('cpu') for k, v in net.state_dict().items()}
-            state_dict = OrderedDict(state_dict)
-            use_net.load_state_dict(state_dict)
+            use_net = copy_net_to_cpu(net)
 
         use_net.eval()
         agent = DQNAgent(use_net, epsilon=0.0, device='cpu' if use_cpu else self.model.device)
