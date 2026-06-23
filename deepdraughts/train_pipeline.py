@@ -1,6 +1,7 @@
 from __future__ import print_function
 
 import configparser
+import json
 
 import numpy as np
 import pickle
@@ -50,6 +51,7 @@ class TrainPipeline:
         self.check_freq = config.getint("evaluation", "eval_freq", fallback=100)
         self.save_freq = config.getint("evaluation", "checkpoint_freq", fallback=200)
         self.n_eval_games = config.getint("evaluation", "n_eval_games", fallback=100)
+        self.n_eval_playout = config.getint("evaluation", "n_eval_playout", fallback=25)
 
         self.game_args = game_args
         self.model = model
@@ -63,6 +65,22 @@ class TrainPipeline:
         self.global_step = 0
         self.current_eps = self.get_epsilon()
         self.current_beta = self.get_beta()
+
+        self.last_avg_reward = None
+
+        self.hparams = {
+            "eps_start": self.eps_start,
+            "eps_end": self.eps_end,
+            "eps_decay": self.eps_decay,
+            "beta_start": self.beta_start,
+            "beta_frames": self.beta_frames,
+            "gamma": self.gamma,
+            "tau": self.tau,
+            "lr": self.lr,
+            "batch_size": self.batch_size,
+            "epochs": self.epochs,
+            "buffer_size": self.buffer_size,
+        }
 
         if train_state is not None:
             self.load_train_state(train_state)
@@ -124,6 +142,13 @@ class TrainPipeline:
         self.current_beta = self.get_beta()
         self.model.policy_net.train()
 
+        # Dump model hiperparameters
+        self.writer.add_text(
+            "config/hparams",
+            "```json\n" + json.dumps(self.hparams, indent=2) + "\n```",
+            global_step=0
+        )
+
         # self.model.policy_net.to(device=self.model.device)
 
         # Add to Buffer
@@ -153,8 +178,9 @@ class TrainPipeline:
             b_next_board = np.stack(batch[4])
             b_next_state = np.stack(batch[5])
             b_done = np.array(batch[6], dtype=np.uint8)
+            b_next_legal_mask = np.array(batch[7])
 
-            batch_data = (b_board, b_state, b_action, b_reward, b_next_board, b_next_state, b_done)
+            batch_data = (b_board, b_state, b_action, b_reward, b_next_board, b_next_state, b_done, b_next_legal_mask)
 
             loss, q_vals, td_errors = self.model.train_step(batch_data, self.gamma, self.lr, weights, self.n_steps)
             td_errors_np = td_errors.detach().abs().cpu().numpy().flatten()
@@ -168,29 +194,19 @@ class TrainPipeline:
         print(
             f"Epoch {self.n_epoch} | Buffer: {self.replay_buffer.pos} | Epsilon: {self.current_eps:.4f} | Avg loss: {(avg_loss * 10):.4f} | Q max: {q_max:.2f} | Q mean: {q_mean:.2f} | Beta: {self.current_beta:.4f}")
 
-        self.writer.add_hparams({
-            "epsilon": self.current_eps,
-            "beta": self.current_beta,
-        }, {
-            "loss": avg_loss,
-            "q_max": q_max,
-            "q_mean": q_mean,
-        },
-        global_step=self.global_step,
-        name=self.name)
-
-        # self.writer.add_scalar("loss", avg_loss, self.n_epoch)
-        # self.writer.add_scalar("epsilon", self.current_eps, self.n_epoch)
-        # self.writer.add_scalar("beta", self.current_beta, self.n_epoch)
-        # self.writer.add_scalar("q_mean", q_mean, self.n_epoch)
-        # self.writer.add_scalar("q_max", q_max, self.n_epoch)
+        self.writer.add_scalar("train/epsilon", self.current_eps, self.n_epoch)
+        self.writer.add_scalar("train/beta", self.current_beta, self.n_epoch)
+        self.writer.add_scalar("train/q_mean", q_mean, self.n_epoch)
+        self.writer.add_scalar("train/q_max", q_max, self.n_epoch)
+        self.writer.add_scalar("train/loss", avg_loss, self.n_epoch)
+        self.writer.add_scalar("train/buffer_size", self.replay_buffer.pos, self.n_epoch)
 
         return avg_loss
 
     def run(self):
         """Main Loop"""
         print("Starting DQN Training...")
-        n_playout = 100
+        n_playout = self.n_eval_playout
         mcts_side = BLACK
         self.model.policy_net.to(device=self.model.device)
 
@@ -215,10 +231,11 @@ class TrainPipeline:
             if self.n_epoch % self.check_freq == 0:
                 print(f"Evaluating with MCTS {n_playout} playouts")
                 mcts_player = MCTS_pure(c_puct=5, n_playout=n_playout)
-                n_playout = self.evaluate(n_playout, mcts_side, mcts_player, self.n_eval_games, model_name='mcts')
-            if self.n_epoch % self.save_freq == 0:
-                print(f"Saving Checkpoint at epoch {self.n_epoch}", end=' - ')
-                self.save_checkpoint()
+                n_playout, avg_reward = self.evaluate(n_playout, mcts_side, mcts_player, self.n_eval_games, model_name='mcts')
+                if self.n_epoch % self.save_freq == 0 and (self.last_avg_reward is None or avg_reward > self.last_avg_reward):
+                    self.last_avg_reward = avg_reward
+                    print(f"Saving Checkpoint at epoch {self.n_epoch}", end=' - ')
+                    self.save_checkpoint()
 
     def save_checkpoint(self):
         now_time = datetime.datetime.now().strftime("%Y%m%d_%H%M")
@@ -228,23 +245,14 @@ class TrainPipeline:
         self.model.save(savepath+'.pth.tar', self.n_epoch)
         config_snapshot = {section: dict(self.config[section]) for section in self.config.sections()}
 
+
         train_state = {
+            **self.hparams,
             "n_epoch": self.n_epoch,
             "global_step": self.global_step,
             "current_eps": self.current_eps,
             "current_beta": self.current_beta,
-            "eps_start": self.eps_start,
-            "eps_end": self.eps_end,
-            "eps_decay": self.eps_decay,
-            "beta_start": self.beta_start,
-            "beta_frames": self.beta_frames,
             "training_side": self.training_side,
-            "gamma": self.gamma,
-            "tau": self.tau,
-            "lr": self.lr,
-            "batch_size": self.batch_size,
-            "epochs": self.epochs,
-            "buffer_size": self.buffer_size,
             "replay_buffer": {
                 "capacity": self.replay_buffer.capacity,
                 "alpha": self.replay_buffer.alpha,
@@ -325,13 +333,13 @@ class TrainPipeline:
         loss_ratio = losses / evaluation_games
         avg_reward = reward / evaluation_games
 
-        self.writer.add_scalar(f"{model_name} avg_reward", avg_reward, self.n_epoch)
-        self.writer.add_scalar(f"{model_name} win_ratio", win_ratio, self.n_epoch)
-        self.writer.add_scalar(f"{model_name} loss_ratio", loss_ratio, self.n_epoch)
-        self.writer.add_scalar(f"{model_name} mcts_n_playout", n_playout, self.n_epoch)
+        self.writer.add_scalar(f"eval/avg_reward", avg_reward, self.n_epoch)
+        self.writer.add_scalar(f"eval/win_ratio", win_ratio, self.n_epoch)
+        self.writer.add_scalar(f"eval/loss_ratio", loss_ratio, self.n_epoch)
+        self.writer.add_scalar(f"eval/mcts_n_playout", n_playout, self.n_epoch)
         end_time = time.perf_counter()
         print(
             f'<{model_name}> | Time: {(end_time-start_time):.2f} | Win ratio: {win_ratio:.2f} | Loss ratio: {loss_ratio:.2f} | Avg reward: {avg_reward:.4f} | mcts_n_playout: {n_playout}')
         if win_ratio > 0.75:
             n_playout *= 2
-        return min(n_playout, 10000)
+        return min(n_playout, 10000), avg_reward

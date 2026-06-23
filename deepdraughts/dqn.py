@@ -6,7 +6,7 @@ from .env import WHITE, BLACK
 
 # Single transition tuple
 Transition = namedtuple('Transition', (
-'state_vec_board', 'state_vec_extra', 'action', 'reward', 'next_state_vec_board', 'next_state_vec_extra', 'done'))
+'state_vec_board', 'state_vec_extra', 'action', 'reward', 'next_state_vec_board', 'next_state_vec_extra', 'done', 'b_next_legal_mask'))
 
 
 class ReplayBuffer:
@@ -92,9 +92,9 @@ class DQNAgent:
     def get_action(self, game, side=None):
         """
         Select action using epsilon-greedy policy.
+        Assumption: Q-values are from the perspective of the current player,
+        so the agent always chooses argmax among legal actions.
         """
-        if side is None:
-            side = self.side
         available_moves = game.get_all_available_moves()
         if not available_moves:
             return None, 0
@@ -103,32 +103,42 @@ class DQNAgent:
         if np.random.random() < self.epsilon:
             return random.choice(available_moves), 0
 
-        # Exploitation
         vec_board, vec_state = game.to_vector()
 
-        # Prepare tensors
-        t_board = torch.from_numpy(vec_board).float().to(device=self.device).unsqueeze(0)
-        t_state = torch.from_numpy(vec_state).float().to(device=self.device).unsqueeze(0)
+        t_board = torch.as_tensor(vec_board, dtype=torch.float32, device=self.device).unsqueeze(0)
+        t_state = torch.as_tensor(vec_state, dtype=torch.float32, device=self.device).unsqueeze(0)
 
+        was_training = self.net.training
         self.net.eval()
+
         with torch.no_grad():
-            q_values = self.net(t_board, t_state)  # Shape: [1, n_actions]
-            # q_values = q_values.cpu().numpy().flatten()
+            q_values = self.net(t_board, t_state)[0]  # [n_actions]
 
-        # Mask invalid moves with -infinity
-        legal_mask = torch.full_like(q_values, -float('inf') if side == WHITE else float('inf'))
-        move_to_q_index = {}
+            legal_move_by_id = {}
+            legal_ids = []
 
-        for idx, move in enumerate(available_moves):
-            move_id = move.id()
-            move_to_q_index[move_id] = idx
-            legal_mask[0, move_id] = 0
+            for move in available_moves:
+                move_id = move.id()
 
-        q_values += legal_mask
+                if move_id < 0 or move_id >= q_values.shape[0]:
+                    raise ValueError(
+                        f"Illegal move_id={move_id}. Expected range: 0..{q_values.shape[0] - 1}"
+                    )
 
-        best_move_idx = torch.argmax(q_values) if side == WHITE else torch.argmin(q_values)
-        best_move = available_moves[move_to_q_index[best_move_idx.item()]]
-        best_q = q_values[0, best_move_idx].item()  # q-value for the best move
+                legal_move_by_id[move_id] = move
+                legal_ids.append(move_id)
+
+            legal_ids = torch.as_tensor(legal_ids, dtype=torch.long, device=self.device)
+
+            legal_q_values = q_values[legal_ids]
+            best_local_idx = torch.argmax(legal_q_values).item() if side == WHITE else torch.argmin(legal_q_values).item()
+
+            best_move_id = legal_ids[best_local_idx].item()
+            best_move = legal_move_by_id[best_move_id]
+            best_q = q_values[best_move_id].item()
+
+        if was_training:
+            self.net.train()
 
         return best_move, best_q
 

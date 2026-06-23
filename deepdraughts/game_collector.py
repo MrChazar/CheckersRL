@@ -1,4 +1,5 @@
-from deepdraughts.env.py_env.env_utils import enable_endgame_database, get_endgame_database, set_endgame_database
+from deepdraughts.env.py_env.env_utils import enable_endgame_database, get_endgame_database, set_endgame_database, \
+    NO_WINNER
 from .env import Game, game_status_to_str, game_is_drawn, game_is_over, game_winner
 from .dqn import DQNAgent
 import numpy as np
@@ -11,7 +12,7 @@ from .env import *
 GAME_WIN = 1.
 GAME_TIE = 0.
 GAME_LOSS = -1.
-PIECE_TAKEN = .03
+PIECE_TAKEN = .01
 #KING_TAKEN = 8.
 
 class GameCollector():
@@ -24,90 +25,190 @@ class GameCollector():
         return pieces_taken
 
     @classmethod
-    def self_play(cls, shared_net, epsilon, game_args=dict(), shared_database=None, training_side=WHITE, n_steps=1, gamma=0.99, device='cpu'):
+    def self_play(
+            cls,
+            shared_net,
+            epsilon,
+            game_args=dict(),
+            shared_database=None,
+            training_side=WHITE,
+            n_steps=1,
+            gamma=0.99,
+            device='cpu'
+    ):
         """
         Play one game using DQN Agent (Self-play).
-        Returns list of transitions: [(s, a, r, s', done), ...]
+
+        Returns:
+            transitions, winner
+
+        Each transition:
+            (
+                s_board,
+                s_state,
+                action_id,
+                n_step_reward,
+                next_board,
+                next_state,
+                done,
+                next_legal_mask
+            )
+
+        next_legal_mask:
+            np.ndarray of shape [n_actions]
+            True  -> legal action in next_state
+            False -> illegal action in next_state
         """
-        np.random.seed()  # Re-seed in process
+
+        np.random.seed()
+
         if shared_database is not None:
             enable_endgame_database(shared_database)
 
-        # Initialize Agent with shared network
-        agent = DQNAgent(shared_net, epsilon=epsilon, device=device)  # GPU inside process might be tricky so its better to use cpu
+        agent = DQNAgent(
+            shared_net,
+            epsilon=epsilon,
+            device=device
+        )
 
         game = Game(**game_args)
+
+        # Get number of actions from network
+        if hasattr(shared_net, "n_actions"):
+            n_actions = shared_net.n_actions
+        elif hasattr(shared_net, "module") and hasattr(shared_net.module, "n_actions"):
+            n_actions = shared_net.module.n_actions
+        else:
+            raise ValueError("Cannot determine n_actions from shared_net.")
+
+        def build_legal_mask(moves):
+            mask = np.zeros(n_actions, dtype=np.bool_)
+
+            for move in moves:
+                move_id = move.id()
+
+                if move_id < 0 or move_id >= n_actions:
+                    raise ValueError(
+                        f"move.id()={move_id} is outside valid range 0..{n_actions - 1}"
+                    )
+
+                mask[move_id] = True
+
+            return mask
 
         # Temp storage
         states = []
         actions = []
         players = []
         rewards = []
+        legal_masks = []
+
+        winner = NO_WINNER
 
         while True:
-            # Get current state
+            # Current state
             vec_board, vec_state = game.to_vector()
+
+            available_moves = game.get_all_available_moves()
+            if not available_moves:
+                # This should usually be handled by game status,
+                # but this prevents crashing on move.id().
+                winner = -game.current_player
+                break
+
+            current_legal_mask = build_legal_mask(available_moves)
+
             states.append((vec_board, vec_state))
             players.append(game.current_player)
+            legal_masks.append(current_legal_mask)
 
             # Agent selects action
             move, _ = agent.get_action(game, game.current_player)
-            actions.append(move.id())  # Store ID for DQN
+            if move is None:
+                winner = -game.current_player
+                break
+
+            actions.append(move.id())
 
             # Apply move
             pieces_before_move = cls.get_number_of_taken_pieces(game, training_side)
+
             game_status = game.do_move(move)
+
             pieces_after_move = cls.get_number_of_taken_pieces(game, training_side)
-            # rewards/penalty for taking/losing pieces
+
+            # Reward / penalty for taking or losing pieces
             rewards.append((pieces_after_move - pieces_before_move) * PIECE_TAKEN)
 
             if game_is_over(game_status):
                 winner = game_winner(game_status)
-                if winner == 0:
+
+                if winner == NO_WINNER:
                     rewards[-1] += GAME_TIE
                 elif winner == training_side:
                     rewards[-1] += GAME_WIN
                 else:
                     rewards[-1] += GAME_LOSS
+
                 break
 
-        # Game Over - Process Rewards
         transitions = []
-        #winner = game_winner(game_status)
-        #is_draw = game_is_drawn(game_status)
+
         total_moves = len(actions)
+        if total_moves == 0:
+            return transitions, winner
+
         dones = [False] * total_moves
         dones[-1] = True
 
-        # Assign rewards and build transitions (s, a, r, s', done)
+        terminal_board = np.zeros_like(states[0][0])
+        terminal_state = np.zeros_like(states[0][1])
+        terminal_legal_mask = np.zeros(n_actions, dtype=np.bool_)
+
         for t in range(total_moves):
             R = 0.0
             done_n = False
+            last_step = 0
 
-            k = 0
             for step in range(n_steps):
-                if t + step >= total_moves:
+                idx = t + step
+
+                if idx >= total_moves:
                     break
 
-                R += (gamma ** step) * rewards[t + step]
-                k = step
-                if dones[t + step]:
+                R += (gamma ** step) * rewards[idx]
+                last_step = step
+
+                if dones[idx]:
                     done_n = True
                     break
 
-            # next state after n steps
-            if t + k + 1 < total_moves and not done_n:
-                ns_board, ns_state = states[t + k + 1]
+            next_idx = t + last_step + 1
+
+            if next_idx < total_moves and not done_n:
+                ns_board, ns_state = states[next_idx]
+                ns_legal_mask = legal_masks[next_idx]
             else:
-                ns_board = np.zeros_like(states[t][0])
-                ns_state = np.zeros_like(states[t][1])
+                ns_board = terminal_board
+                ns_state = terminal_state
+                ns_legal_mask = terminal_legal_mask
 
             s_board, s_state = states[t]
-            a = actions[t]
+            action_id = actions[t]
 
             transitions.append(
-                (s_board, s_state, a, R, ns_board, ns_state, done_n)
+                (
+                    s_board,
+                    s_state,
+                    action_id,
+                    R,
+                    ns_board,
+                    ns_state,
+                    done_n,
+                    ns_legal_mask
+                )
             )
+
         return transitions, winner
 
     @classmethod
