@@ -2,7 +2,8 @@ import numpy as np
 import random
 from collections import deque, namedtuple
 import torch
-from .env import WHITE, BLACK
+
+from deepdraughts.env import WHITE
 
 # Single transition tuple
 Transition = namedtuple('Transition', (

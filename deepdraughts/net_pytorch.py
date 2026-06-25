@@ -7,6 +7,7 @@ import numpy as np
 import os
 import datetime
 import copy
+from collections import OrderedDict
 
 
 def set_learning_rate(optimizer, lr):
@@ -36,43 +37,33 @@ class DQNNet(nn.Module):
         self.n_actions = n_actions
 
         # Feature Extractor (CNN)
-        self.conv1 = nn.Conv2d(4, 64, kernel_size=3, padding=1)
-        self.bn1 = nn.BatchNorm2d(64)
-        self.conv2 = nn.Conv2d(64, 128, kernel_size=3, padding=1)
-        self.bn2 = nn.BatchNorm2d(128)
-        self.conv3 = nn.Conv2d(128, 128, kernel_size=3, padding=1)
-        self.bn3 = nn.BatchNorm2d(128)
-        self.conv4 = nn.Conv2d(128, 64, kernel_size=3, padding=1)
-        self.bn4 = nn.BatchNorm2d(64)
+        self.conv1 = nn.Conv2d(4, 32, kernel_size=3, padding=1)
+        self.bn1 = nn.BatchNorm2d(32)
+        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
+        self.bn2 = nn.BatchNorm2d(64)
 
         # State processing
-        self.st_fc1 = nn.Linear(n_states, 128)
-        self.st_bn1 = nn.BatchNorm1d(128)
+        self.st_fc1 = nn.Linear(n_states, 64)
+        self.st_bn1 = nn.BatchNorm1d(64)
 
-        # linear
-        #self.fc_common = nn.Linear(128 * nsize * nsize + 64, 512)
-        #self.fc_q_head = nn.Linear(512, n_actions)
-
-        # ending layers of standard DQN above (commented out)
         # ending layers implementing dueling DQN belowself.
-        self.fc_common = nn.Linear(64 * nsize * nsize + 128, 512)
-        self.fc_common_bn = nn.BatchNorm1d(512)
-        self.dropout = nn.Dropout(0.5)
+        self.fc_common = nn.Linear(64 * nsize * nsize + 64, 256)
+        self.fc_common_bn = nn.BatchNorm1d(256)
+        self.dropout = nn.Dropout(0.3)
 
         # Value stream
-        self.fc_value = nn.Linear(512, 256)
-        self.fc_value_bn = nn.BatchNorm1d(256)
-        self.value_head = nn.Linear(256, 1)
+        self.fc_value = nn.Linear(256, 128)
+        self.fc_value_bn = nn.BatchNorm1d(128)
+        self.value_head = nn.Linear(128, 1)
 
         # Advantage stream
-        self.fc_adv = nn.Linear(512, 256)
-        self.fc_adv_bn = nn.BatchNorm1d(256)
-        self.adv_head = nn.Linear(256, n_actions)
+        self.fc_adv = nn.Linear(256, 128)
+        self.fc_adv_bn = nn.BatchNorm1d(128)
+        self.adv_head = nn.Linear(128, n_actions)
 
         _initialize_weights(self)
 
     def forward(self, vec_board, vec_state):
-
         if vec_board.dim() == 3:
             vec_board = vec_board.unsqueeze(0)
 
@@ -85,9 +76,6 @@ class DQNNet(nn.Module):
         # CNN Path
         x = F.relu(self.bn1(self.conv1(vec_board)))
         x = F.relu(self.bn2(self.conv2(x)))
-        x = F.relu(self.bn3(self.conv3(x)))
-        x = F.relu(self.bn4(self.conv4(x)))
-
         x = torch.flatten(x, start_dim=1) # Flatten
 
         # State Path
@@ -113,10 +101,134 @@ class DQNNet(nn.Module):
 
         return q_values
 
-class Model:
-    """DQN Model Handler with Target Network"""
 
-    def __init__(self, env_args, name="dqn_default", device='cpu', l2_const=1e-4, recursive_steps=4):
+class DQNNetGRU(nn.Module):
+    """DQN Network with GRU: Input (Board, State) -> Output (Q-values for all actions)
+    
+    Uwaga: GRU hidden state jest obsługiwany wewnątrz klasy Model, nie tutaj!
+    """
+
+    def __init__(self, nsize, n_states, n_actions, gru_hidden_size=256):
+        super(DQNNetGRU, self).__init__()
+
+        self.nsize = nsize
+        self.board_width = nsize
+        self.board_height = nsize
+        self.n_states = n_states
+        self.n_actions = n_actions
+        self.gru_hidden_size = gru_hidden_size
+
+        # Feature Extractor (CNN)
+        self.conv1 = nn.Conv2d(4, 32, kernel_size=3, padding=1)
+        self.bn1 = nn.BatchNorm2d(32)
+        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
+        self.bn2 = nn.BatchNorm2d(64)
+
+        # State processing
+        self.st_fc1 = nn.Linear(n_states, 64)
+        self.st_bn1 = nn.BatchNorm1d(64)
+
+        # GRU layer - bierze połączone features
+        self.gru = nn.GRU(
+            input_size=64 * nsize * nsize + 64,
+            hidden_size=gru_hidden_size,
+            num_layers=2,
+            batch_first=False,  # WAŻNE: TIME jest na wymiarze 0, BATCH na wymiarze 1
+            dropout=0.3
+        )
+
+        # Common layers after GRU
+        self.fc_common = nn.Linear(gru_hidden_size, 256)
+        self.fc_common_bn = nn.BatchNorm1d(256)
+        self.dropout = nn.Dropout(0.3)
+
+        # Value stream
+        self.fc_value = nn.Linear(256, 128)
+        self.fc_value_bn = nn.BatchNorm1d(128)
+        self.value_head = nn.Linear(128, 1)
+
+        # Advantage stream
+        self.fc_adv = nn.Linear(256, 128)
+        self.fc_adv_bn = nn.BatchNorm1d(128)
+        self.adv_head = nn.Linear(128, n_actions)
+
+        self.hidden_state = None
+
+        _initialize_weights(self)
+
+    def reset_hidden(self, batch_size, device):
+        """Reset hidden state - używaj w train_step() dla każdego batcha"""
+        self.hidden_state = torch.zeros(
+            2,  # num_layers
+            batch_size,
+            self.gru_hidden_size,
+            device=device
+        )
+
+    def forward(self, vec_board, vec_state, reset_hidden=True):
+        """
+        Args:
+            vec_board: shape (B, 4, H, W) 
+            vec_state: shape (B, n_states)
+        
+        Returns:
+            q_values: shape (B, n_actions)
+        """
+        
+        if vec_board.dim() == 3:
+            vec_board = vec_board.unsqueeze(0)  # (B, 4, H, W)
+
+        if vec_state.dim() == 1:
+            vec_state = vec_state.unsqueeze(0)  # (B, n_states)
+
+
+        B, C, H, W = vec_board.shape
+
+        if reset_hidden or self.hidden_state is None:
+            self.reset_hidden(B, vec_board.device)
+
+        # CNN Path
+        x = F.relu(self.bn1(self.conv1(vec_board)))
+        x = F.relu(self.bn2(self.conv2(x)))
+        x = torch.flatten(x, start_dim=1)  # (B, CNN_out)
+        
+        # State Path
+        y = F.relu(self.st_bn1(self.st_fc1(vec_state)))  # (B, 64)
+        
+        # Merge CNN i State features
+        combined = torch.cat((x, y), dim=1)  # (B, combined_size)
+        
+        # GRU expects (T, B, features) gdzie T=1 dla pojedynczych stanów
+        combined_gru = combined.unsqueeze(0)  # (1, B, combined_size)
+
+        # GRU processing (bez hidden state - będzie None)
+        gru_out, self.hidden_state = self.gru(combined_gru, self.hidden_state)  # (B, 1, gru_hidden_size)
+
+        # Weź output z timestep'u
+        gru_last = gru_out[-1, :, :]  # (B, gru_hidden_size)
+
+        # Common layers
+        feat = F.relu(self.fc_common_bn(self.fc_common(gru_last)))
+        feat = self.dropout(feat)
+
+        # Value stream
+        value = F.relu(self.fc_value_bn(self.fc_value(feat)))
+        value = self.value_head(value)  # shape: (B, 1)
+
+        # Advantage stream
+        adv = F.relu(self.fc_adv_bn(self.fc_adv(feat)))
+        adv = self.adv_head(adv)  # shape: (B, n_actions)
+
+        # Combine streams (dueling DQN)
+        q_values = value + (adv - adv.mean(dim=1, keepdim=True))
+
+        return q_values
+
+
+class Model:
+    """DQN Model Handler with Target Network and GRU support"""
+
+    def __init__(self, env_args, name="dqn_default", device='cpu', l2_const=1e-4, use_gru=False):
         nsize, _, n_states, n_actions = env_args
         self.nsize = nsize
         self.n_states = n_states
@@ -124,19 +236,23 @@ class Model:
         self.name = name
         self.device = device
         self.l2_const = l2_const
+        self.use_gru = use_gru
 
         # Policy Network (Training)
-        self.policy_net = DQNNet(nsize, n_states, n_actions)
-        # Target Network (Stable targets)
-        self.target_net = DQNNet(nsize, n_states, n_actions)
+        if use_gru:
+            self.policy_net = DQNNetGRU(nsize, n_states, n_actions, 256)
+            self.target_net = DQNNetGRU(nsize, n_states, n_actions, 256)
+        else:
+            self.policy_net = DQNNet(nsize, n_states, n_actions)
+            self.target_net = DQNNet(nsize, n_states, n_actions)
 
         self.policy_net = self.policy_net.to(device=self.device)
         self.target_net = self.target_net.to(device=self.device)
 
         self.target_net.load_state_dict(self.policy_net.state_dict())
-        self.target_net.eval()  # Target net is never trained directly !!!!
+        self.target_net.eval()
 
-        self.optimizer = optim.Adam(self.policy_net.parameters(), weight_decay=self.l2_const, )
+        self.optimizer = optim.Adam(self.policy_net.parameters(), weight_decay=self.l2_const)
 
     def sync_target_network(self):
         """Copy weights from policy net to target net"""
@@ -145,24 +261,7 @@ class Model:
 
     def train_step(self, batch_data, gamma, lr, weights, n_steps):
         """
-        Perform one Double DQN training step.
-
-        Expected batch_data:
-            (
-                b_board,
-                b_state,
-                b_action,
-                b_reward,
-                b_next_board,
-                b_next_state,
-                b_done,
-                b_next_legal_mask
-            )
-
-        b_next_legal_mask shape:
-            [batch_size, n_actions]
-            True  -> legal action
-            False -> illegal action
+        Perform one Double DQN training step with GRU support.
         """
 
         (
@@ -212,17 +311,15 @@ class Model:
         set_learning_rate(self.optimizer, lr)
 
         # Current Q(s, a)
-        q_values = self.policy_net(state_board, state_extra)  # [B, n_actions]
+        q_values = self.policy_net(state_board, state_extra)
         q_val = q_values.gather(1, action)  # [B, 1]
 
         # Double DQN target
         with torch.no_grad():
-            # Important if policy_net uses BatchNorm:
-            # use eval mode while selecting next actions, so BN stats are not updated
             was_training = self.policy_net.training
             self.policy_net.eval()
 
-            next_q_online = self.policy_net(next_board, next_extra)  # [B, n_actions]
+            next_q_online = self.policy_net(next_board, next_extra)
 
             if was_training:
                 self.policy_net.train()
@@ -233,33 +330,28 @@ class Model:
                 -float("inf")
             )
 
-            # WALIDACJA: sprawdź czy są nielegalne akcje
+            # WALIDACJA
             has_legal_moves = next_legal_mask.any(dim=1)
             if not has_legal_moves.all():
-                # Jeśli nie ma legalnych ruchów, ustaw Q-value na 0
                 next_q_online_masked[~has_legal_moves] = 0.0
 
-            # Select best legal action according to online net
+            # Select best legal action
             next_actions = next_q_online_masked.argmax(dim=1, keepdim=True)  # [B, 1]
 
-            # Evaluate selected action using target net
-            next_q_target = self.target_net(next_board, next_extra)  # [B, n_actions]
+            # Evaluate using target net
+            next_q_target = self.target_net(next_board, next_extra)
             next_q_value = next_q_target.gather(1, next_actions)  # [B, 1]
 
-            # If b_reward is already n-step return, gamma ** n_steps is correct.
-            # If b_reward is only immediate reward, use gamma instead.
             expected_q_val = reward + (gamma ** n_steps) * next_q_value * (1.0 - done)
 
         td_errors = q_val - expected_q_val  # [B, 1]
 
-        # Huber loss per sample
         loss_per_sample = F.smooth_l1_loss(
             q_val,
             expected_q_val,
             reduction="none"
         )  # [B, 1]
 
-        # Apply importance sampling weights, e.g. from prioritized replay
         loss = (weights * loss_per_sample).mean()
 
         loss.backward()
@@ -283,6 +375,7 @@ class Model:
             'n_epoch': epoch,
             'device': self.device,
             'l2_const': self.l2_const,
+            'use_gru': self.use_gru,
             'model': self.policy_net.state_dict(),
             'target_model': self.target_net.state_dict(),
             'optimizer': self.optimizer.state_dict(),
@@ -293,7 +386,8 @@ class Model:
         # Implementation similar to the original code, adapted for DQN
         model_params = torch.load(model_file, map_location=torch.device(device=device))
         env_args = (model_params['nsize'], model_params['device'], model_params['n_states'], model_params['n_actions'])
-        model = Model(env_args, model_params['name'], device, model_params['l2_const'])
+        use_gru = model_params.get('use_gru', True)  # Domyślnie False dla starych modeli
+        model = Model(env_args, model_params['name'], device, model_params['l2_const'], use_gru=use_gru)
         model.policy_net.load_state_dict(model_params['model'])
         if 'target_model' in model_params:
             model.target_net.load_state_dict(model_params['target_model'])  # Sync target on load
@@ -301,9 +395,6 @@ class Model:
             model.target_net.load_state_dict(model_params['model'])  # Sync target on load
         model.optimizer.load_state_dict(model_params['optimizer'])
         return model
-
-
-from collections import OrderedDict
 
 
 def copy_net_to_cpu(net):
@@ -320,15 +411,13 @@ def copy_net_to_cpu(net):
             net.n_states,
             net.n_actions
         )
-    #
-    # elif isinstance(net, RecursiveDQNNet):
-    #     use_net = RecursiveDQNNet(
-    #         net.nsize,
-    #         net.n_states,
-    #         net.n_actions,
-    #         recursive_steps=net.recursive_steps
-    #     )
-
+    elif isinstance(net, DQNNetGRU):
+        use_net = DQNNetGRU(
+            net.nsize,
+            net.n_states,
+            net.n_actions,
+            gru_hidden_size=net.gru_hidden_size
+        )
     else:
         raise TypeError(f"Unsupported model type: {type(net).__name__}")
 

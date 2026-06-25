@@ -45,6 +45,8 @@ class TrainPipeline:
         self.eps_decay = config.getfloat("training_args", "epsilon_decay")
         self.beta_start = config.getfloat("training_args", "beta_start", fallback=0.4)
         self.beta_frames = config.getfloat("training_args", "beta_frames", fallback=200_000)
+
+        # Model args
         self.n_steps = config.getint("model_args", "n_steps")
 
         # Evaluation Args
@@ -81,6 +83,13 @@ class TrainPipeline:
             "epochs": self.epochs,
             "buffer_size": self.buffer_size,
         }
+
+        # Dump model hiperparameters
+        self.writer.add_text(
+            "config/hparams",
+            "```json\n" + json.dumps(self.hparams, indent=2) + "\n```",
+            global_step=self.global_step,
+        )
 
         if train_state is not None:
             self.load_train_state(train_state)
@@ -141,13 +150,6 @@ class TrainPipeline:
         self.current_eps = self.get_epsilon()
         self.current_beta = self.get_beta()
         self.model.policy_net.train()
-
-        # Dump model hiperparameters
-        self.writer.add_text(
-            "config/hparams",
-            "```json\n" + json.dumps(self.hparams, indent=2) + "\n```",
-            global_step=0
-        )
 
         # self.model.policy_net.to(device=self.model.device)
 
