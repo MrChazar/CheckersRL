@@ -224,11 +224,88 @@ class DQNNetGRU(nn.Module):
 
         return q_values
 
+class HRMDQNNet(nn.Module):
+    def __init__(self, nsize, n_states, n_actions, latent_dim=256, cycles=3, low_steps=4):
+        super().__init__()
+
+        self.nsize = nsize
+        self.n_actions = n_actions
+        self.cycles = cycles
+        self.low_steps = low_steps
+
+        self.conv1 = nn.Conv2d(4, 32, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
+
+        self.board_fc = nn.Linear(64 * nsize * nsize, 192)
+        self.state_fc = nn.Linear(n_states, 64)
+
+        self.encoder = nn.Linear(192 + 64, latent_dim)
+
+        self.h_init = nn.Linear(latent_dim, latent_dim)
+        self.l_init = nn.Linear(latent_dim, latent_dim)
+
+        self.h_cell = nn.GRUCell(latent_dim * 2, latent_dim)
+        self.l_cell = nn.GRUCell(latent_dim * 3, latent_dim)
+
+        self.h_norm = nn.LayerNorm(latent_dim)
+        self.l_norm = nn.LayerNorm(latent_dim)
+
+        self.final_fc = nn.Linear(latent_dim * 3, latent_dim)
+
+        self.value_head = nn.Sequential(
+            nn.Linear(latent_dim, 128),
+            nn.ReLU(),
+            nn.Linear(128, 1)
+        )
+
+        self.adv_head = nn.Sequential(
+            nn.Linear(latent_dim, 128),
+            nn.ReLU(),
+            nn.Linear(128, n_actions)
+        )
+
+    def forward(self, vec_board, vec_state):
+        if vec_board.dim() == 3:
+            vec_board = vec_board.unsqueeze(0)
+
+        if vec_state.dim() == 1:
+            vec_state = vec_state.unsqueeze(0)
+
+        x = F.relu(self.conv1(vec_board))
+        x = F.relu(self.conv2(x))
+        x = torch.flatten(x, start_dim=1)
+        x = F.relu(self.board_fc(x))
+
+        y = F.relu(self.state_fc(vec_state))
+
+        z = torch.cat([x, y], dim=1)
+        z = torch.tanh(self.encoder(z))
+
+        h = torch.tanh(self.h_init(z))
+        l = torch.tanh(self.l_init(z))
+
+        for _ in range(self.cycles):
+            h_input = torch.cat([z, l], dim=1)
+            h = self.h_norm(self.h_cell(h_input, h))
+
+            for _ in range(self.low_steps):
+                l_input = torch.cat([z, h, l], dim=1)
+                l = self.l_norm(self.l_cell(l_input, l))
+
+        feat = torch.cat([z, h, l], dim=1)
+        feat = F.relu(self.final_fc(feat))
+
+        value = self.value_head(feat)
+        adv = self.adv_head(feat)
+
+
+        q_values = value + adv - adv.mean(dim=1, keepdim=True)
+        return q_values
 
 class Model:
     """DQN Model Handler with Target Network and GRU support"""
 
-    def __init__(self, env_args, name="dqn_default", device='cpu', l2_const=1e-4, use_gru=False):
+    def __init__(self, env_args, name="dqn_default", device='cpu', l2_const=1e-4, model_type=""):
         nsize, _, n_states, n_actions = env_args
         self.nsize = nsize
         self.n_states = n_states
@@ -236,12 +313,15 @@ class Model:
         self.name = name
         self.device = device
         self.l2_const = l2_const
-        self.use_gru = use_gru
+        self.model_type = model_type
 
         # Policy Network (Training)
-        if use_gru:
+        if model_type=="gru":
             self.policy_net = DQNNetGRU(nsize, n_states, n_actions, 256)
             self.target_net = DQNNetGRU(nsize, n_states, n_actions, 256)
+        elif model_type=="hrm":
+            self.policy_net = HRMDQNNet(nsize, n_states, n_actions, 256, 3, 4)
+            self.target_net = HRMDQNNet(nsize, n_states, n_actions, 256, 3, 4)
         else:
             self.policy_net = DQNNet(nsize, n_states, n_actions)
             self.target_net = DQNNet(nsize, n_states, n_actions)
@@ -375,7 +455,7 @@ class Model:
             'n_epoch': epoch,
             'device': self.device,
             'l2_const': self.l2_const,
-            'use_gru': self.use_gru,
+            'model_type': self.model_type,
             'model': self.policy_net.state_dict(),
             'target_model': self.target_net.state_dict(),
             'optimizer': self.optimizer.state_dict(),
@@ -386,8 +466,8 @@ class Model:
         # Implementation similar to the original code, adapted for DQN
         model_params = torch.load(model_file, map_location=torch.device(device=device))
         env_args = (model_params['nsize'], model_params['device'], model_params['n_states'], model_params['n_actions'])
-        use_gru = model_params.get('use_gru', True)  # Domyślnie False dla starych modeli
-        model = Model(env_args, model_params['name'], device, model_params['l2_const'], use_gru=use_gru)
+        model_type = model_params.get('model_type', True)  # Domyślnie False dla starych modeli
+        model = Model(env_args, model_params['name'], device, model_params['l2_const'], model_type=model_type)
         model.policy_net.load_state_dict(model_params['model'])
         if 'target_model' in model_params:
             model.target_net.load_state_dict(model_params['target_model'])  # Sync target on load
@@ -410,6 +490,14 @@ def copy_net_to_cpu(net):
             net.nsize,
             net.n_states,
             net.n_actions
+        )
+    elif isinstance(net, HRMDQNNet):
+        use_net = HRMDQNNet(
+            net.nsize,
+            net.n_states,
+            net.latent_dim,
+            net.cycles,
+            net.low_steps,
         )
     elif isinstance(net, DQNNetGRU):
         use_net = DQNNetGRU(

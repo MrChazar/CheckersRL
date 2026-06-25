@@ -22,13 +22,13 @@ def run_train_pipline(config):
     name = config.get("model_args", "name", fallback="DQN")
     device = config.get("model_args", "device", fallback="cuda")
     l2_const = config.getfloat("model_args", "l2_const", fallback=0)
-    use_gru = config.getboolean("model_args", "use_gru", fallback=False)
+    model_type = config.get("model_args", "model_type", fallback="")
     train_state = None
 
     if not checkpoint:
         env_args = get_env_args()
         print(f"Starting new model {name} | device: {device}")
-        model = Model(env_args, name=name, device=device, l2_const=l2_const, use_gru=use_gru)
+        model = Model(env_args, name=name, device=device, l2_const=l2_const, model_type=model_type)
     else:
         state_path = checkpoint + "_state.pkl"
         model_path = checkpoint + ".pth.tar"
